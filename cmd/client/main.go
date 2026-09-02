@@ -5,11 +5,12 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"sync"
+
+	"github.com/hashicorp/yamux"
 )
 
 const (
-	ListenAddr = "0.0.0.0:3300"
+	ServerAddr = "127.0.0.1:3101"
 	TargetAddr = "127.0.0.1:8000"
 )
 
@@ -17,66 +18,83 @@ const (
 	ErrCannotListen = 1
 )
 
-type client struct {
-	logger slog.Logger
-	wg     sync.WaitGroup
+type khelamClient struct {
+	logger  slog.Logger
+	session *yamux.Session
 }
 
 func main() {
 	logHandler := slog.NewTextHandler(os.Stdout, nil)
 	logger := slog.New(logHandler)
 
-	listener, err := net.Listen("tcp", ListenAddr)
+	rawServerConn, err := net.Dial("tcp", ServerAddr)
 	if err != nil {
-		logger.Error("Cannon start listner", "address", ListenAddr)
+		logger.Error("Cannot connect to server", "serverAddr", ServerAddr)
 		os.Exit(ErrCannotListen)
 	}
 
-	logger.Info("Proxy Started", "listenAddr", ListenAddr, "targetAddr", TargetAddr)
+	logger.Info("Connected to server", "serverAddr", ServerAddr)
 
-	proxyClient := client{
-		logger: *logger,
+	session, err := yamux.Client(rawServerConn, nil)
+	if err != nil {
+		logger.Error("Cannot start yamux session")
+		panic(err)
 	}
 
+	client := khelamClient{
+		logger:  *logger,
+		session: session,
+	}
+
+	defer client.stop()
+	client.start()
+}
+
+func (kc *khelamClient) stop() {
+	kc.session.Close()
+}
+
+func (kc *khelamClient) start() {
 	for {
-		conn, err := listener.Accept()
+		conn, err := kc.session.Accept()
 		if err != nil {
-			logger.Error("Failed to accept connection", "clientAddr", conn.RemoteAddr())
+			kc.logger.Error("Failed to accept connection", "clientAddr", conn.RemoteAddr())
 			continue
 		}
 
-		go proxyClient.handleConnection(conn)
+		go kc.handleConnection(conn)
 	}
 }
 
-func (c *client) handleConnection(srcConn net.Conn) {
+func (kc *khelamClient) handleConnection(srcConn net.Conn) {
 	defer srcConn.Close()
 
 	destConn, err := net.Dial("tcp", TargetAddr)
 	if err != nil {
-		c.logger.Error("Failed connecting to local service", "serviceAddr", TargetAddr)
+		kc.logger.Error("Failed connecting to local service", "serviceAddr", TargetAddr)
 		return
 	}
 	defer destConn.Close()
 
-	c.logger.Info("Request recieved", "clientAddr", srcConn.RemoteAddr())
-	c.wg.Add(2)
+	kc.logger.Info("Request recieved", "clientAddr", srcConn.RemoteAddr())
+
+	done := make(chan struct{}, 2)
 
 	go func() {
-		defer c.wg.Done()
 		_, err := io.Copy(destConn, srcConn)
 		if err != nil {
-			c.logger.Error("Error copying", "clientAddr", srcConn.RemoteAddr(), "listenAddr", ListenAddr)
+			kc.logger.Error("Error copying", "clientAddr", srcConn.RemoteAddr())
 		}
+		done <- struct{}{}
 	}()
 
 	go func() {
-		defer c.wg.Done()
 		_, err := io.Copy(srcConn, destConn)
 		if err != nil {
-			c.logger.Error("Error copying", "clientAddr", srcConn.RemoteAddr(), "listenAddr", ListenAddr)
+			kc.logger.Error("Error copying", "clientAddr", srcConn.RemoteAddr())
 		}
+		done <- struct{}{}
 	}()
 
-	c.wg.Wait()
+	<-done
 }
