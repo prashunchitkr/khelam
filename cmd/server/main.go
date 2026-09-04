@@ -7,11 +7,12 @@ import (
 	"os"
 
 	"github.com/hashicorp/yamux"
+	"github.com/prashunchitkr/khelamgg/internal/config"
+	"github.com/prashunchitkr/khelamgg/internal/logger"
 )
 
 const (
 	PublicListenAddr = "0.0.0.0:3100"
-	ClientListenAddr = "0.0.0.0:3101"
 )
 
 type khelamServer struct {
@@ -21,16 +22,24 @@ type khelamServer struct {
 }
 
 func main() {
-	logHandler := slog.NewTextHandler(os.Stdout, nil)
-	logger := slog.New(logHandler)
+	logger := logger.New(logger.LoggerOptions{
+		Writer: os.Stdout,
+		Level:  slog.LevelInfo,
+	})
 
-	clientListener, err := net.Listen("tcp", ClientListenAddr)
+	serverConfig, err := config.GetServerConfig(os.Args[1:])
 	if err != nil {
-		logger.Error("Cannot listen for client", "clientAddr", ClientListenAddr)
+		logger.Error("error when parsing flags", "error", err)
+		os.Exit(1)
+	}
+
+	clientListener, err := net.Listen("tcp", serverConfig.ControlAddress)
+	if err != nil {
+		logger.Error("Cannot listen for client", "clientAddr", serverConfig.ControlAddress)
 		os.Exit(-1)
 	}
 
-	logger.Info("Listening for clients", "clientAddr", ClientListenAddr)
+	logger.Info("Listening for clients", "clientAddr", serverConfig.ControlAddress)
 
 	rawClientConn, err := clientListener.Accept()
 	if err != nil {

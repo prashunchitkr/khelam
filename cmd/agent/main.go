@@ -7,11 +7,8 @@ import (
 	"os"
 
 	"github.com/hashicorp/yamux"
-)
-
-const (
-	ServerAddr = "127.0.0.1:3101"
-	TargetAddr = "127.0.0.1:8000"
+	"github.com/prashunchitkr/khelamgg/internal/config"
+	"github.com/prashunchitkr/khelamgg/internal/logger"
 )
 
 const (
@@ -20,20 +17,29 @@ const (
 
 type khelamClient struct {
 	logger  slog.Logger
+	cfg     config.AgentConfig
 	session *yamux.Session
 }
 
 func main() {
-	logHandler := slog.NewTextHandler(os.Stdout, nil)
-	logger := slog.New(logHandler)
+	logger := logger.New(logger.LoggerOptions{
+		Writer: os.Stdout,
+		Level:  slog.LevelInfo,
+	})
 
-	rawServerConn, err := net.Dial("tcp", ServerAddr)
+	agentCfg, err := config.GetAgentConfig(os.Args[1:])
 	if err != nil {
-		logger.Error("Cannot connect to server", "serverAddr", ServerAddr)
+		logger.Error("error while parsing flags", "error", err)
+		os.Exit(1)
+	}
+
+	rawServerConn, err := net.Dial("tcp", agentCfg.ServerAddress)
+	if err != nil {
+		logger.Error("Cannot connect to server", "serverAddr", agentCfg.ServerAddress)
 		os.Exit(ErrCannotListen)
 	}
 
-	logger.Info("Connected to server", "serverAddr", ServerAddr)
+	logger.Info("Connected to server", "serverAddr", agentCfg.ServerAddress)
 
 	session, err := yamux.Client(rawServerConn, nil)
 	if err != nil {
@@ -43,6 +49,7 @@ func main() {
 
 	client := khelamClient{
 		logger:  *logger,
+		cfg:     agentCfg,
 		session: session,
 	}
 
@@ -69,9 +76,9 @@ func (kc *khelamClient) start() {
 func (kc *khelamClient) handleConnection(srcConn net.Conn) {
 	defer srcConn.Close()
 
-	destConn, err := net.Dial("tcp", TargetAddr)
+	destConn, err := net.Dial("tcp", kc.cfg.TunnelAddress)
 	if err != nil {
-		kc.logger.Error("Failed connecting to local service", "serviceAddr", TargetAddr)
+		kc.logger.Error("Failed connecting to local service", "serviceAddr", kc.cfg.TunnelAddress)
 		return
 	}
 	defer destConn.Close()
