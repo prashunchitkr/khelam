@@ -10,7 +10,7 @@ import (
 const (
 	KiB                 = 1 << 10
 	HeaderSizeBytes     = 4
-	MaxPayloadSizeBytes = 10 * KiB // 1 KiB
+	MaxPayloadSizeBytes = 10 * KiB // 10 KiB
 )
 
 const (
@@ -24,19 +24,19 @@ type Envelope struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-// ConnectionInitMessage agent -> server
-type ConnectionInitMessage struct {
+// RegisterMessage agent -> server
+type RegisterMessage struct {
 	Name string `json:"name"`
 }
 
-// ConnectionOkMessage server -> agent
-type ConnectionOkMessage struct {
+// OkMessage server -> agent
+type OkMessage struct {
 	Name       string `json:"name"`
-	PublicPort uint16 `json:"public_port"`
+	PublicPort uint32 `json:"public_port"`
 }
 
-// ConnectionErrMessage server -> agent
-type ConnectionErrMessage struct {
+// ErrorMessage server -> agent
+type ErrorMessage struct {
 	Reason string `json:"reason"`
 }
 
@@ -51,9 +51,9 @@ func decodePayload[T any](payload []byte) (any, error) {
 }
 
 var registry = map[string]func([]byte) (any, error){
-	KindRegister: decodePayload[ConnectionInitMessage],
-	KindOk:       decodePayload[ConnectionOkMessage],
-	KindError:    decodePayload[ConnectionErrMessage],
+	KindRegister: decodePayload[RegisterMessage],
+	KindOk:       decodePayload[OkMessage],
+	KindError:    decodePayload[ErrorMessage],
 }
 
 func WriteMessage(w io.Writer, kind string, payload any) error {
