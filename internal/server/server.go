@@ -27,6 +27,7 @@ type Server struct {
 
 	mu       sync.Mutex
 	sessions map[*yamux.Session]struct{}
+	closing  bool
 	wg       sync.WaitGroup
 }
 
@@ -39,13 +40,21 @@ func New(options Options) *Server {
 	}
 }
 
-// Start runs the server until ctx is cancelled, then shuts down all
-// active agent tunnels before returning.
+// Start listens on the configured control address and serves agents
+// until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) error {
 	listener, err := net.Listen("tcp", s.cfg.ControlAddress)
 	if err != nil {
 		return fmt.Errorf("error listening to agents: %w", err)
 	}
+
+	return s.Serve(ctx, listener)
+}
+
+// Serve accepts agents on listener until ctx is cancelled, then shuts
+// down all active agent tunnels before returning. Serve takes ownership
+// of listener.
+func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	defer listener.Close()
 
 	s.logger.Info("server accepting clients", "address", listener.Addr().String())
@@ -77,6 +86,8 @@ func (s *Server) Start(ctx context.Context) error {
 func (s *Server) closeSessions() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.closing = true
 
 	for session := range s.sessions {
 		session.Close()
@@ -111,6 +122,28 @@ func (s *Server) allocatePublicListener() (uint32, net.Listener, error) {
 	}
 
 	return 0, nil, fmt.Errorf("no bindable public port: %w", lastErr)
+}
+
+// trackSession registers session for shutdown. It returns false if the
+// server is already shutting down, in which case the caller must close
+// the session itself.
+func (s *Server) trackSession(session *yamux.Session) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closing {
+		return false
+	}
+
+	s.sessions[session] = struct{}{}
+	return true
+}
+
+func (s *Server) untrackSession(session *yamux.Session) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.sessions, session)
 }
 
 func openPortListener(port uint32) (net.Listener, error) {

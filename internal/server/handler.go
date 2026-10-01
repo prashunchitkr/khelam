@@ -71,18 +71,15 @@ func (s *Server) handleAgentConnection(conn net.Conn) {
 	}
 	defer session.Close()
 
-	s.mu.Lock()
-	s.sessions[session] = struct{}{}
-	s.mu.Unlock()
-
 	defer func() {
-		s.mu.Lock()
-		delete(s.sessions, session)
-		s.mu.Unlock()
-
 		publicListener.Close()
 		s.portPool.Release(port)
 	}()
+
+	if !s.trackSession(session) {
+		return
+	}
+	defer s.untrackSession(session)
 
 	s.logger.Info("tunnel allocated", "agentName", register.Name, "publicPort", port)
 

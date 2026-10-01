@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"time"
 
@@ -19,41 +20,92 @@ import (
 const (
 	dialTimeout      = 10 * time.Second
 	handshakeTimeout = 5 * time.Second
+
+	minBackoff = 1 * time.Second
+	maxBackoff = 30 * time.Second
 )
 
 // Options carries the dependencies required to construct an Agent.
 type Options struct {
 	Logger *slog.Logger
 	Cfg    config.AgentConfig
+
+	// OnTunnel, if set, is called with the assigned public port each
+	// time a tunnel is established.
+	OnTunnel func(publicPort uint32)
 }
 
-// Agent maintains a single tunnel session with the server.
+// Agent maintains a tunnel session with the server, reconnecting
+// whenever it is lost.
 type Agent struct {
-	logger *slog.Logger
-	cfg    config.AgentConfig
+	logger   *slog.Logger
+	cfg      config.AgentConfig
+	onTunnel func(publicPort uint32)
 }
 
 func New(options Options) *Agent {
 	return &Agent{
-		logger: options.Logger,
-		cfg:    options.Cfg,
+		logger:   options.Logger,
+		cfg:      options.Cfg,
+		onTunnel: options.OnTunnel,
 	}
 }
 
-// Run registers with the server and relays tunnel traffic until ctx is
-// cancelled or the session ends. It returns nil only when ctx is
-// cancelled.
+// Run keeps a tunnel session alive until ctx is cancelled, reconnecting
+// with exponential backoff whenever the session fails or ends.
 func (a *Agent) Run(ctx context.Context) error {
+	backoff := minBackoff
+
+	for {
+		established, err := a.runSession(ctx)
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		// A session that got as far as a tunnel was healthy, so the
+		// next failure starts the backoff over.
+		if established {
+			backoff = minBackoff
+		}
+
+		wait := jitter(backoff)
+		a.logger.Warn("tunnel lost, reconnecting", "error", err, "retryIn", wait)
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(wait):
+		}
+
+		backoff = min(backoff*2, maxBackoff)
+	}
+}
+
+// jitter spreads d over [d/2, d) so agents do not reconnect in lockstep.
+func jitter(d time.Duration) time.Duration {
+	half := d / 2
+	return half + rand.N(half)
+}
+
+// runSession registers with the server and relays tunnel traffic until
+// ctx is cancelled or the session ends. established reports whether the
+// tunnel was set up before the session ended.
+func (a *Agent) runSession(ctx context.Context) (established bool, err error) {
 	dialer := net.Dialer{Timeout: dialTimeout}
 	conn, err := dialer.DialContext(ctx, "tcp", a.cfg.ServerAddress)
 	if err != nil {
-		return fmt.Errorf("cannot connect to server %s: %w", a.cfg.ServerAddress, err)
+		return false, fmt.Errorf("cannot connect to server %s: %w", a.cfg.ServerAddress, err)
 	}
 	defer conn.Close()
 
+	// Closing the connection on cancellation unblocks the handshake and
+	// tears down the yamux session built on top of it.
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+
 	publicPort, err := a.handshake(conn)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	a.logger.Info("tunnel established", "agentName", a.cfg.Name, "publicPort", publicPort, "tunnelAddr", a.cfg.TunnelAddress)
@@ -62,25 +114,18 @@ func (a *Agent) Run(ctx context.Context) error {
 	// so the agent must do the same.
 	session, err := yamux.Client(conn, yamux.DefaultConfig())
 	if err != nil {
-		return fmt.Errorf("cannot start yamux session: %w", err)
+		return false, fmt.Errorf("cannot start yamux session: %w", err)
 	}
 	defer session.Close()
 
-	go func() {
-		select {
-		case <-ctx.Done():
-			session.Close()
-		case <-session.CloseChan():
-		}
-	}()
+	if a.onTunnel != nil {
+		a.onTunnel(publicPort)
+	}
 
 	for {
 		stream, err := session.Accept()
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return fmt.Errorf("tunnel session ended: %w", err)
+			return true, fmt.Errorf("tunnel session ended: %w", err)
 		}
 
 		go a.handleStream(stream)
