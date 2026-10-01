@@ -176,6 +176,11 @@ func (a *Agent) runSession(ctx context.Context, tlsConfig *tls.Config) (establis
 	session, err := transport.Dial(dialCtx, a.cfg.ServerAddress, tlsConfig)
 	cancel()
 	if err != nil {
+		// The usual cause is a server on its default self-signed
+		// certificate with nothing configured to trust it.
+		if _, ok := errors.AsType[*tls.CertificateVerificationError](err); ok && a.cfg.Fingerprint == "" && a.cfg.TLSCAFile == "" {
+			return false, fmt.Errorf("cannot connect to server %s: %w (if the server uses its self-signed certificate, pass -fingerprint with the value from the server's startup log)", a.cfg.ServerAddress, err)
+		}
 		return false, fmt.Errorf("cannot connect to server %s: %w", a.cfg.ServerAddress, err)
 	}
 	defer session.Close(transport.CloseNormal, "")

@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -184,6 +185,9 @@ func TestRejectsUntrustedServerPermanently(t *testing.T) {
 	err := waitResult(t, result)
 	if _, ok := errors.AsType[*tls.CertificateVerificationError](err); !ok {
 		t.Fatalf("Run() = %v, want certificate verification error", err)
+	}
+	if !strings.Contains(err.Error(), "-fingerprint") {
+		t.Fatalf("Run() = %v, want a hint to use -fingerprint", err)
 	}
 }
 
