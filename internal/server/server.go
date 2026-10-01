@@ -12,11 +12,6 @@ import (
 	"github.com/prashunchitkr/khelamgg/internal/config"
 )
 
-const (
-	portPoolStart = 41000
-	portPoolEnd   = 41999
-)
-
 // Options carries the dependencies required to construct a Server.
 type Options struct {
 	Logger *slog.Logger
@@ -39,7 +34,7 @@ func New(options Options) *Server {
 	return &Server{
 		logger:   options.Logger,
 		cfg:      options.Cfg,
-		portPool: NewPortPool(portPoolStart, portPoolEnd),
+		portPool: NewPortPool(options.Cfg.PortRangeStart, options.Cfg.PortRangeEnd),
 		sessions: make(map[*yamux.Session]struct{}),
 	}
 }
