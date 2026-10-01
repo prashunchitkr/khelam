@@ -24,10 +24,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := server.New(server.Options{
+	srv, err := server.New(server.Options{
 		Logger: logger,
 		Cfg:    serverConfig,
 	})
+	if err != nil {
+		logger.Error("error initializing server", "error", err)
+		os.Exit(1)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

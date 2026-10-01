@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 )
 
 const (
@@ -15,7 +16,7 @@ const (
 
 // Version is the protocol version spoken by this build. The server
 // rejects agents that register with a different version.
-const Version = 1
+const Version = 2
 
 const (
 	KindRegister   = "REGISTER"
@@ -29,17 +30,44 @@ type Envelope struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-// RegisterMessage agent -> server
-type RegisterMessage struct {
-	Version int    `json:"version"`
-	Name    string `json:"name"`
-	Token   string `json:"token,omitempty"`
+// Protocol is the transport protocol of a tunnel.
+type Protocol string
+
+const (
+	ProtocolTCP Protocol = "tcp"
+	ProtocolUDP Protocol = "udp"
+)
+
+// TunnelRequest asks the server to expose one local service.
+type TunnelRequest struct {
+	// Name is unique per agent and keys the agent's sticky port.
+	Name     string   `json:"name"`
+	Protocol Protocol `json:"protocol"`
 }
 
-// OkMessage server -> agent
+// RegisterMessage agent -> server, the first message on the control
+// stream.
+type RegisterMessage struct {
+	Version int `json:"version"`
+	// AgentID is a stable random identifier for this agent install.
+	AgentID string          `json:"agent_id"`
+	Name    string          `json:"name"`
+	Token   string          `json:"token,omitempty"`
+	Tunnels []TunnelRequest `json:"tunnels"`
+}
+
+// TunnelAssignment describes a tunnel the server has opened.
+type TunnelAssignment struct {
+	// ID identifies the tunnel in stream headers and datagrams.
+	ID         uint32   `json:"id"`
+	Name       string   `json:"name"`
+	Protocol   Protocol `json:"protocol"`
+	PublicPort uint32   `json:"public_port"`
+}
+
+// OkMessage server -> agent, listing tunnels in request order.
 type OkMessage struct {
-	Name       string `json:"name"`
-	PublicPort uint32 `json:"public_port"`
+	Tunnels []TunnelAssignment `json:"tunnels"`
 }
 
 // ErrorCode classifies a rejected registration so the agent can decide
@@ -77,6 +105,8 @@ type ErrorMessage struct {
 // StreamOpenMessage server -> agent, sent as the first frame of every
 // tunnelled stream. The tunnelled bytes follow it directly.
 type StreamOpenMessage struct {
+	// TunnelID is the tunnel the client connected to.
+	TunnelID uint32 `json:"tunnel_id"`
 	// ClientAddr is the address of the public client that connected.
 	ClientAddr string `json:"client_addr"`
 	// PublicAddr is the server address the client connected to.
@@ -162,4 +192,29 @@ func ReadMessage(r io.Reader) (any, error) {
 	}
 
 	return decoder(env.Payload)
+}
+
+// UDPFlowIdleTimeout is how long a UDP flow may stay silent in both
+// directions before the server and agent forget it.
+const UDPFlowIdleTimeout = 60 * time.Second
+
+// DatagramHeaderSize is the length of the header in front of every
+// tunnelled UDP payload.
+const DatagramHeaderSize = 8
+
+// AppendDatagram appends a tunnelled UDP datagram to dst. flowID
+// identifies one public client of the tunnel.
+func AppendDatagram(dst []byte, tunnelID, flowID uint32, payload []byte) []byte {
+	dst = binary.BigEndian.AppendUint32(dst, tunnelID)
+	dst = binary.BigEndian.AppendUint32(dst, flowID)
+	return append(dst, payload...)
+}
+
+// ParseDatagram splits a tunnelled UDP datagram into its parts. payload
+// aliases b.
+func ParseDatagram(b []byte) (tunnelID, flowID uint32, payload []byte, err error) {
+	if len(b) < DatagramHeaderSize {
+		return 0, 0, nil, fmt.Errorf("datagram too short (%d bytes)", len(b))
+	}
+	return binary.BigEndian.Uint32(b[0:4]), binary.BigEndian.Uint32(b[4:8]), b[DatagramHeaderSize:], nil
 }

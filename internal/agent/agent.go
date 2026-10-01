@@ -1,5 +1,6 @@
 // Package agent implements the client side of a tunnel: it registers
-// with the server and relays each incoming stream to a local service.
+// its tunnels with the server and relays their traffic to local
+// services.
 package agent
 
 import (
@@ -8,17 +9,16 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand/v2"
 	"net"
-	"net/netip"
 	"os"
 	"time"
 
 	"github.com/prashunchitkr/khelamgg/internal/config"
 	"github.com/prashunchitkr/khelamgg/internal/protocol"
-	"github.com/prashunchitkr/khelamgg/internal/proxyproto"
-	"github.com/prashunchitkr/khelamgg/internal/relay"
+	"github.com/prashunchitkr/khelamgg/internal/tlsutil"
 	"github.com/prashunchitkr/khelamgg/internal/transport"
 )
 
@@ -30,14 +30,18 @@ const (
 	maxBackoff = 30 * time.Second
 )
 
+// ErrReplaced is returned when another agent with the same ID connects
+// to the server, which then drops this one.
+var ErrReplaced = errors.New("another agent with the same ID connected to the server")
+
 // Options carries the dependencies required to construct an Agent.
 type Options struct {
 	Logger *slog.Logger
 	Cfg    config.AgentConfig
 
-	// OnTunnel, if set, is called with the assigned public port each
-	// time a tunnel is established.
-	OnTunnel func(publicPort uint32)
+	// OnTunnel, if set, is called with the assigned tunnels each time
+	// the agent registers.
+	OnTunnel func(tunnels []protocol.TunnelAssignment)
 }
 
 // Agent maintains a tunnel session with the server, reconnecting
@@ -45,7 +49,7 @@ type Options struct {
 type Agent struct {
 	logger   *slog.Logger
 	cfg      config.AgentConfig
-	onTunnel func(publicPort uint32)
+	onTunnel func(tunnels []protocol.TunnelAssignment)
 }
 
 func New(options Options) *Agent {
@@ -70,7 +74,8 @@ func (e *RejectedError) Error() string {
 // Run keeps a tunnel session alive until ctx is cancelled, reconnecting
 // with exponential backoff whenever the session fails or ends. It gives
 // up and returns an error only when retrying cannot help, such as a bad
-// token or an untrusted server certificate.
+// token, an untrusted server certificate, or another agent taking over
+// this agent's ID.
 func (a *Agent) Run(ctx context.Context) error {
 	tlsConfig, err := a.tlsConfig()
 	if err != nil {
@@ -120,26 +125,32 @@ func isPermanent(err error) bool {
 		return !rejected.Code.Retryable()
 	}
 
-	_, ok := errors.AsType[*tls.CertificateVerificationError](err)
-	return ok
-}
-
-// tlsConfig builds the client TLS configuration, or returns nil when
-// TLS is disabled.
-func (a *Agent) tlsConfig() (*tls.Config, error) {
-	if !a.cfg.TLS {
-		return nil, nil
+	if _, ok := errors.AsType[*tls.CertificateVerificationError](err); ok {
+		return true
 	}
 
+	if _, ok := errors.AsType[*tlsutil.FingerprintMismatchError](err); ok {
+		return true
+	}
+
+	return errors.Is(err, ErrReplaced)
+}
+
+// tlsConfig builds the client TLS configuration: a pinned fingerprint,
+// a custom CA, or the system roots.
+func (a *Agent) tlsConfig() (*tls.Config, error) {
 	host, _, err := net.SplitHostPort(a.cfg.ServerAddress)
 	if err != nil {
 		return nil, fmt.Errorf("invalid server address %q: %w", a.cfg.ServerAddress, err)
 	}
 
-	cfg := &tls.Config{
-		ServerName: host,
-		MinVersion: tls.VersionTLS13,
+	if a.cfg.Fingerprint != "" {
+		cfg := tlsutil.PinnedConfig(a.cfg.Fingerprint)
+		cfg.ServerName = host
+		return cfg, nil
 	}
+
+	cfg := &tls.Config{ServerName: host}
 
 	if a.cfg.TLSCAFile != "" {
 		pem, err := os.ReadFile(a.cfg.TLSCAFile)
@@ -159,141 +170,116 @@ func (a *Agent) tlsConfig() (*tls.Config, error) {
 
 // runSession registers with the server and relays tunnel traffic until
 // ctx is cancelled or the session ends. established reports whether the
-// tunnel was set up before the session ended.
+// tunnels were set up before the session ended.
 func (a *Agent) runSession(ctx context.Context, tlsConfig *tls.Config) (established bool, err error) {
-	var conn net.Conn
-	netDialer := &net.Dialer{Timeout: dialTimeout}
-	if tlsConfig != nil {
-		dialer := tls.Dialer{NetDialer: netDialer, Config: tlsConfig}
-		conn, err = dialer.DialContext(ctx, "tcp", a.cfg.ServerAddress)
-	} else {
-		conn, err = netDialer.DialContext(ctx, "tcp", a.cfg.ServerAddress)
-	}
+	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+	session, err := transport.Dial(dialCtx, a.cfg.ServerAddress, tlsConfig)
+	cancel()
 	if err != nil {
 		return false, fmt.Errorf("cannot connect to server %s: %w", a.cfg.ServerAddress, err)
 	}
-	defer conn.Close()
+	defer session.Close(transport.CloseNormal, "")
 
-	// Closing the connection on cancellation unblocks the handshake and
-	// tears down the yamux session built on top of it.
-	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	stop := context.AfterFunc(ctx, func() {
+		session.Close(transport.CloseNormal, "agent shutting down")
+	})
 	defer stop()
 
-	publicPort, err := a.handshake(conn)
+	control, assignments, err := a.handshake(ctx, session)
 	if err != nil {
 		return false, err
 	}
+	defer control.Close()
 
-	a.logger.Info("tunnel established", "agentName", a.cfg.Name, "publicPort", publicPort, "tunnelAddr", a.cfg.TunnelAddress)
-
-	// After the OK reply the server multiplexes the connection, so the
-	// agent must do the same.
-	session, err := transport.Client(conn)
-	if err != nil {
-		return false, fmt.Errorf("cannot start session: %w", err)
+	tunnels := make(map[uint32]config.TunnelConfig, len(assignments))
+	hasUDP := false
+	for _, assignment := range assignments {
+		for _, tc := range a.cfg.Tunnels {
+			if tc.Name == assignment.Name {
+				tunnels[assignment.ID] = tc
+				hasUDP = hasUDP || tc.Protocol == protocol.ProtocolUDP
+				a.logger.Info("tunnel established", "tunnel", tc.Name, "protocol", tc.Protocol, "publicPort", assignment.PublicPort, "localAddr", tc.LocalAddress)
+			}
+		}
 	}
-	defer session.Close()
 
 	if a.onTunnel != nil {
-		a.onTunnel(publicPort)
+		a.onTunnel(assignments)
 	}
 
+	if hasUDP {
+		forwarder := newUDPForwarder(session, tunnels, a.logger)
+		go forwarder.run()
+	}
+
+	// The control stream lives as long as the session. The server
+	// closing it ends the session.
+	go func() {
+		io.Copy(io.Discard, control)
+		session.Close(transport.CloseNormal, "control stream closed")
+	}()
+
 	for {
-		stream, err := session.Accept()
+		stream, err := session.AcceptStream(context.Background())
 		if err != nil {
+			if code, ok := transport.PeerCloseCode(err); ok && code == transport.CloseReplaced {
+				return true, ErrReplaced
+			}
 			return true, fmt.Errorf("tunnel session ended: %w", err)
 		}
 
-		go a.handleStream(stream)
+		go a.handleStream(stream, tunnels)
 	}
 }
 
-// handshake registers the agent and returns the assigned public port.
-func (a *Agent) handshake(conn net.Conn) (uint32, error) {
-	conn.SetDeadline(time.Now().Add(handshakeTimeout))
-	defer conn.SetDeadline(time.Time{})
+// handshake opens the control stream, registers the agent's tunnels and
+// returns the server's assignments.
+func (a *Agent) handshake(ctx context.Context, session transport.Session) (net.Conn, []protocol.TunnelAssignment, error) {
+	openCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
 
-	if err := protocol.WriteMessage(conn, protocol.KindRegister, protocol.RegisterMessage{
-		Version: protocol.Version,
-		Name:    a.cfg.Name,
-		Token:   a.cfg.Token,
-	}); err != nil {
-		return 0, fmt.Errorf("failed to send register message: %w", err)
+	control, err := session.OpenStream(openCtx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot open control stream: %w", err)
 	}
 
-	reply, err := protocol.ReadMessage(conn)
+	control.SetDeadline(time.Now().Add(handshakeTimeout))
+	defer control.SetDeadline(time.Time{})
+
+	requests := make([]protocol.TunnelRequest, len(a.cfg.Tunnels))
+	for i, tc := range a.cfg.Tunnels {
+		requests[i] = protocol.TunnelRequest{Name: tc.Name, Protocol: tc.Protocol}
+	}
+
+	if err := protocol.WriteMessage(control, protocol.KindRegister, protocol.RegisterMessage{
+		Version: protocol.Version,
+		AgentID: a.cfg.AgentID,
+		Name:    a.cfg.Name,
+		Token:   a.cfg.Token,
+		Tunnels: requests,
+	}); err != nil {
+		control.Close()
+		return nil, nil, fmt.Errorf("failed to send register message: %w", err)
+	}
+
+	reply, err := protocol.ReadMessage(control)
 	if err != nil {
-		return 0, fmt.Errorf("failed to read handshake reply: %w", err)
+		control.Close()
+		return nil, nil, fmt.Errorf("failed to read handshake reply: %w", err)
 	}
 
 	switch msg := reply.(type) {
 	case protocol.OkMessage:
-		return msg.PublicPort, nil
-	case protocol.ErrorMessage:
-		return 0, &RejectedError{Code: msg.Code, Reason: msg.Reason}
-	default:
-		return 0, errors.New("unexpected handshake reply")
-	}
-}
-
-// handleStream reads the stream header and relays the tunnelled
-// connection to the local service.
-func (a *Agent) handleStream(stream net.Conn) {
-	header, err := readStreamHeader(stream)
-	if err != nil {
-		a.logger.Error("invalid stream header", "error", err)
-		stream.Close()
-		return
-	}
-
-	localConn, err := net.DialTimeout("tcp", a.cfg.TunnelAddress, dialTimeout)
-	if err != nil {
-		a.logger.Error("failed to connect to local service", "tunnelAddr", a.cfg.TunnelAddress, "clientAddr", header.ClientAddr, "error", err)
-		stream.Close()
-		return
-	}
-
-	if a.cfg.ProxyProtocol {
-		if err := writeProxyHeader(localConn, header); err != nil {
-			a.logger.Error("failed to send PROXY header", "clientAddr", header.ClientAddr, "error", err)
-			localConn.Close()
-			stream.Close()
-			return
+		if len(msg.Tunnels) != len(requests) {
+			control.Close()
+			return nil, nil, fmt.Errorf("server assigned %d tunnels, requested %d", len(msg.Tunnels), len(requests))
 		}
+		return control, msg.Tunnels, nil
+	case protocol.ErrorMessage:
+		control.Close()
+		return nil, nil, &RejectedError{Code: msg.Code, Reason: msg.Reason}
+	default:
+		control.Close()
+		return nil, nil, errors.New("unexpected handshake reply")
 	}
-
-	a.logger.Debug("stream opened", "clientAddr", header.ClientAddr)
-	relay.Pipe(stream, localConn)
-}
-
-// readStreamHeader reads the STREAM_OPEN frame that precedes the
-// tunnelled bytes on every stream.
-func readStreamHeader(stream net.Conn) (protocol.StreamOpenMessage, error) {
-	stream.SetReadDeadline(time.Now().Add(handshakeTimeout))
-	defer stream.SetReadDeadline(time.Time{})
-
-	msg, err := protocol.ReadMessage(stream)
-	if err != nil {
-		return protocol.StreamOpenMessage{}, err
-	}
-
-	header, ok := msg.(protocol.StreamOpenMessage)
-	if !ok {
-		return protocol.StreamOpenMessage{}, errors.New("expected stream open message")
-	}
-	return header, nil
-}
-
-func writeProxyHeader(localConn net.Conn, header protocol.StreamOpenMessage) error {
-	client, err := netip.ParseAddrPort(header.ClientAddr)
-	if err != nil {
-		return fmt.Errorf("invalid client address: %w", err)
-	}
-
-	public, err := netip.ParseAddrPort(header.PublicAddr)
-	if err != nil {
-		return fmt.Errorf("invalid public address: %w", err)
-	}
-
-	return proxyproto.WriteV2(localConn, net.TCPAddrFromAddrPort(client), net.TCPAddrFromAddrPort(public))
 }

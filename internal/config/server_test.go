@@ -44,3 +44,46 @@ func TestServerConfigDefaults(t *testing.T) {
 		t.Fatal("ControlAddress has no default")
 	}
 }
+
+func TestParseTunnel(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    TunnelConfig
+		wantErr bool
+	}{
+		{in: "localhost:8000", want: TunnelConfig{Name: "tcp-8000", Protocol: "tcp", LocalAddress: "localhost:8000"}},
+		{in: "udp://localhost:19132", want: TunnelConfig{Name: "udp-19132", Protocol: "udp", LocalAddress: "localhost:19132"}},
+		{in: "mc=tcp://127.0.0.1:25565", want: TunnelConfig{Name: "mc", Protocol: "tcp", LocalAddress: "127.0.0.1:25565"}},
+		{in: "web=[::1]:80", want: TunnelConfig{Name: "web", Protocol: "tcp", LocalAddress: "[::1]:80"}},
+		{in: "sctp://localhost:1", wantErr: true},
+		{in: "=localhost:1", wantErr: true},
+		{in: "localhost", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		got, err := ParseTunnel(tt.in)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("ParseTunnel(%q) succeeded, want error", tt.in)
+			}
+			continue
+		}
+		if err != nil || got != tt.want {
+			t.Errorf("ParseTunnel(%q) = %+v, %v; want %+v", tt.in, got, err, tt.want)
+		}
+	}
+}
+
+func TestAgentIDIsCreatedOnceAndReused(t *testing.T) {
+	path := t.TempDir() + "/nested/agent-id"
+
+	first, err := loadOrCreateAgentID(path)
+	if err != nil || first == "" {
+		t.Fatalf("first load: %q, %v", first, err)
+	}
+
+	second, err := loadOrCreateAgentID(path)
+	if err != nil || second != first {
+		t.Fatalf("second load = %q, %v; want %q", second, err, first)
+	}
+}

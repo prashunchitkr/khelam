@@ -10,7 +10,8 @@ import (
 func TestRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 
-	if err := WriteMessage(&buf, KindOk, OkMessage{Name: "mc", PublicPort: 41000}); err != nil {
+	want := OkMessage{Tunnels: []TunnelAssignment{{ID: 1, Name: "mc", Protocol: ProtocolUDP, PublicPort: 41000}}}
+	if err := WriteMessage(&buf, KindOk, want); err != nil {
 		t.Fatalf("WriteMessage: %v", err)
 	}
 
@@ -23,8 +24,8 @@ func TestRoundTrip(t *testing.T) {
 	if !isOk {
 		t.Fatalf("got %T, want OkMessage", msg)
 	}
-	if ok.Name != "mc" || ok.PublicPort != 41000 {
-		t.Fatalf("got %+v", ok)
+	if len(ok.Tunnels) != 1 || ok.Tunnels[0] != want.Tunnels[0] {
+		t.Fatalf("got %+v, want %+v", ok, want)
 	}
 }
 
@@ -67,5 +68,23 @@ func TestReadMessageRejectsUnknownKind(t *testing.T) {
 
 	if _, err := ReadMessage(&buf); err == nil {
 		t.Fatal("expected error for unknown kind")
+	}
+}
+
+func TestDatagramRoundTrip(t *testing.T) {
+	b := AppendDatagram(nil, 7, 0xdeadbeef, []byte("ping"))
+
+	tunnelID, flowID, payload, err := ParseDatagram(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tunnelID != 7 || flowID != 0xdeadbeef || string(payload) != "ping" {
+		t.Fatalf("got tunnel %d flow %#x payload %q", tunnelID, flowID, payload)
+	}
+}
+
+func TestParseDatagramRejectsShort(t *testing.T) {
+	if _, _, _, err := ParseDatagram(make([]byte, DatagramHeaderSize-1)); err == nil {
+		t.Fatal("expected error for short datagram")
 	}
 }

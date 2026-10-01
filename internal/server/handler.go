@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
+	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/prashunchitkr/khelamgg/internal/protocol"
@@ -15,131 +17,229 @@ import (
 const (
 	handshakeTimeout = 5 * time.Second
 
-	// maxPendingHandshakes caps connections that have not finished
+	// maxPendingHandshakes caps sessions that have not finished
 	// registering, so idle or slow clients cannot pile up.
 	maxPendingHandshakes = 64
+
+	maxTunnelsPerAgent = 16
+	maxNameLength      = 64
+
+	// rejectLinger is how long a rejected session stays open so the
+	// agent can read the ERROR reply before the connection is closed.
+	rejectLinger = time.Second
 )
 
-// handleAgentConnection owns the full lifecycle of a single agent
-// connection: handshake, port allocation, session setup, public accept
-// loop, and teardown.
-func (s *Server) handleAgentConnection(ctx context.Context, conn net.Conn) {
-	defer s.wg.Done()
-	defer conn.Close()
+// tunnel is one public port opened for an agent.
+type tunnel struct {
+	protocol.TunnelAssignment
+	key      reservationKey
+	listener io.Closer
+}
 
-	// Closing the connection on shutdown aborts a pending handshake and
-	// tears down the session built on top of it.
-	stop := context.AfterFunc(ctx, func() { conn.Close() })
+// handleSession owns the full lifecycle of a single agent session:
+// registration, tunnel setup, relaying, and teardown.
+func (s *Server) handleSession(ctx context.Context, session transport.Session) {
+	defer s.wg.Done()
+	defer session.Close(transport.CloseNormal, "")
+
+	stop := context.AfterFunc(ctx, func() {
+		session.Close(transport.CloseShutdown, "server shutting down")
+	})
 	defer stop()
 
-	register, port, publicListener, ok := s.register(conn)
+	control, register, entry, tunnels, ok := s.register(ctx, session)
 	if !ok {
 		return
 	}
+	defer s.releaseAgent(register.AgentID, entry)
 
-	defer func() {
-		publicListener.Close()
-		s.portPool.Release(port)
-	}()
+	s.logger.Info("agent registered", "agentName", register.Name, "agentID", register.AgentID, "agentAddr", session.RemoteAddr(), "tunnels", len(tunnels))
 
-	session, err := transport.Server(conn)
-	if err != nil {
-		s.logger.Error("cannot start session", "agentName", register.Name, "agentAddr", conn.RemoteAddr(), "error", err)
-		return
-	}
-	defer session.Close()
+	var wg sync.WaitGroup
+	udpTunnels := make(map[uint32]*udpTunnel)
 
-	s.logger.Info("tunnel allocated", "agentName", register.Name, "publicPort", port)
+	for _, t := range tunnels {
+		s.logger.Info("tunnel open", "agentName", register.Name, "tunnel", t.Name, "protocol", t.Protocol, "publicPort", t.PublicPort)
 
-	go func() {
-		<-session.CloseChan()
-		publicListener.Close()
-	}()
-
-	var slots chan struct{}
-	if s.cfg.MaxConnsPerTunnel > 0 {
-		slots = make(chan struct{}, s.cfg.MaxConnsPerTunnel)
-	}
-
-	for {
-		publicConn, err := publicListener.Accept()
-		if err != nil {
-			return
+		switch t.Protocol {
+		case protocol.ProtocolTCP:
+			wg.Go(func() { s.serveTCP(session, t) })
+		case protocol.ProtocolUDP:
+			u := s.newUDPTunnel(session, t)
+			udpTunnels[t.ID] = u
+			wg.Go(u.serve)
 		}
-
-		if slots != nil {
-			select {
-			case slots <- struct{}{}:
-			default:
-				s.logger.Warn("tunnel connection limit reached", "agentName", register.Name, "publicPort", port, "publicAddr", publicConn.RemoteAddr())
-				publicConn.Close()
-				continue
-			}
-		}
-
-		go func() {
-			s.bindConnection(session, publicConn)
-			if slots != nil {
-				<-slots
-			}
-		}()
 	}
+
+	if len(udpTunnels) > 0 {
+		wg.Go(func() { s.receiveDatagrams(session, udpTunnels) })
+	}
+
+	// The control stream lives as long as the session. The agent closing
+	// it ends the session.
+	wg.Go(func() {
+		io.Copy(io.Discard, control)
+		session.Close(transport.CloseNormal, "control stream closed")
+	})
+
+	<-session.Done()
+	s.logger.Info("agent disconnected", "agentName", register.Name, "agentID", register.AgentID)
+
+	// Closing the public listeners ends the tunnel loops.
+	s.closeTunnels(tunnels)
+	wg.Wait()
 }
 
-// register runs the handshake on a new agent connection: it validates
-// the REGISTER message, allocates a public port and replies with OK.
-// On failure it sends an ERROR reply when possible and returns false.
-// The OK reply travels over the raw connection before the session takes
-// it over, so the agent learns its public port before multiplexing
-// begins.
-func (s *Server) register(conn net.Conn) (protocol.RegisterMessage, uint32, net.Listener, bool) {
+// register runs the handshake on a new session: it reads REGISTER from
+// the control stream the agent opens, validates it, claims the agent ID,
+// opens every requested tunnel and replies with OK. On failure it sends
+// an ERROR reply when possible and returns false.
+func (s *Server) register(ctx context.Context, session transport.Session) (net.Conn, protocol.RegisterMessage, *agentEntry, []*tunnel, bool) {
 	defer func() { <-s.handshakeSlots }()
 
-	conn.SetDeadline(time.Now().Add(handshakeTimeout))
-	defer conn.SetDeadline(time.Time{})
+	fail := func() (net.Conn, protocol.RegisterMessage, *agentEntry, []*tunnel, bool) {
+		return nil, protocol.RegisterMessage{}, nil, nil, false
+	}
 
-	msg, err := protocol.ReadMessage(conn)
+	acceptCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
+
+	control, err := session.AcceptStream(acceptCtx)
 	if err != nil {
-		s.logger.Error("failed to read handshake message", "agentAddr", conn.RemoteAddr(), "error", err)
-		return protocol.RegisterMessage{}, 0, nil, false
+		s.logger.Error("agent did not open a control stream", "agentAddr", session.RemoteAddr(), "error", err)
+		return fail()
+	}
+
+	control.SetDeadline(time.Now().Add(handshakeTimeout))
+	defer control.SetDeadline(time.Time{})
+
+	msg, err := protocol.ReadMessage(control)
+	if err != nil {
+		s.logger.Error("failed to read handshake message", "agentAddr", session.RemoteAddr(), "error", err)
+		return fail()
 	}
 
 	register, ok := msg.(protocol.RegisterMessage)
 	if !ok {
-		s.reject(conn, protocol.ErrBadRequest, "expected register message")
-		return protocol.RegisterMessage{}, 0, nil, false
+		s.reject(session, control, protocol.ErrBadRequest, "expected register message")
+		return fail()
 	}
 
 	if register.Version != protocol.Version {
-		s.reject(conn, protocol.ErrUnsupportedVersion, fmt.Sprintf("server speaks protocol version %d, agent sent %d", protocol.Version, register.Version))
-		return protocol.RegisterMessage{}, 0, nil, false
+		s.reject(session, control, protocol.ErrUnsupportedVersion, fmt.Sprintf("server speaks protocol version %d, agent sent %d", protocol.Version, register.Version))
+		return fail()
 	}
 
 	if !s.authorized(register.Token) {
-		s.reject(conn, protocol.ErrUnauthorized, "invalid token")
-		return protocol.RegisterMessage{}, 0, nil, false
+		s.reject(session, control, protocol.ErrUnauthorized, "invalid token")
+		return fail()
 	}
 
-	s.logger.Info("agent connected", "agentName", register.Name, "agentAddr", conn.RemoteAddr())
+	if err := validateRegister(register); err != nil {
+		s.reject(session, control, protocol.ErrBadRequest, err.Error())
+		return fail()
+	}
 
-	port, publicListener, err := s.allocatePublicListener()
+	entry, err := s.claimAgent(register.AgentID, session)
 	if err != nil {
-		s.logger.Error("error allocating port", "agentName", register.Name, "agentAddr", conn.RemoteAddr(), "error", err)
-		s.reject(conn, protocol.ErrNoCapacity, "no public port available")
-		return protocol.RegisterMessage{}, 0, nil, false
+		s.reject(session, control, protocol.ErrNoCapacity, err.Error())
+		return fail()
 	}
 
-	if err := protocol.WriteMessage(conn, protocol.KindOk, protocol.OkMessage{
-		Name:       register.Name,
-		PublicPort: port,
-	}); err != nil {
-		s.logger.Error("failed to send port assignment", "agentName", register.Name, "agentAddr", conn.RemoteAddr(), "error", err)
-		publicListener.Close()
-		s.portPool.Release(port)
-		return protocol.RegisterMessage{}, 0, nil, false
+	tunnels, err := s.openTunnels(register)
+	if err != nil {
+		s.releaseAgent(register.AgentID, entry)
+		s.logger.Error("error allocating ports", "agentName", register.Name, "agentAddr", session.RemoteAddr(), "error", err)
+		s.reject(session, control, protocol.ErrNoCapacity, "no public port available")
+		return fail()
 	}
 
-	return register, port, publicListener, true
+	assignments := make([]protocol.TunnelAssignment, len(tunnels))
+	for i, t := range tunnels {
+		assignments[i] = t.TunnelAssignment
+	}
+
+	if err := protocol.WriteMessage(control, protocol.KindOk, protocol.OkMessage{Tunnels: assignments}); err != nil {
+		s.logger.Error("failed to send tunnel assignments", "agentName", register.Name, "agentAddr", session.RemoteAddr(), "error", err)
+		s.closeTunnels(tunnels)
+		s.releaseAgent(register.AgentID, entry)
+		return fail()
+	}
+
+	return control, register, entry, tunnels, true
+}
+
+func validateRegister(register protocol.RegisterMessage) error {
+	if register.AgentID == "" || len(register.AgentID) > maxNameLength {
+		return fmt.Errorf("agent ID must be 1-%d characters", maxNameLength)
+	}
+
+	if len(register.Name) > maxNameLength {
+		return fmt.Errorf("agent name must be at most %d characters", maxNameLength)
+	}
+
+	if len(register.Tunnels) == 0 || len(register.Tunnels) > maxTunnelsPerAgent {
+		return fmt.Errorf("request 1-%d tunnels", maxTunnelsPerAgent)
+	}
+
+	names := make(map[string]bool, len(register.Tunnels))
+	for _, t := range register.Tunnels {
+		if t.Name == "" || len(t.Name) > maxNameLength {
+			return fmt.Errorf("tunnel name must be 1-%d characters", maxNameLength)
+		}
+		if names[t.Name] {
+			return fmt.Errorf("duplicate tunnel name %q", t.Name)
+		}
+		names[t.Name] = true
+
+		if t.Protocol != protocol.ProtocolTCP && t.Protocol != protocol.ProtocolUDP {
+			return fmt.Errorf("tunnel %q: unsupported protocol %q", t.Name, t.Protocol)
+		}
+	}
+
+	return nil
+}
+
+// openTunnels allocates and binds a public port for every requested
+// tunnel, or none if any fails. Tunnel IDs follow request order from 1.
+func (s *Server) openTunnels(register protocol.RegisterMessage) ([]*tunnel, error) {
+	tunnels := make([]*tunnel, 0, len(register.Tunnels))
+
+	for i, req := range register.Tunnels {
+		key := reservationKey{AgentID: register.AgentID, Tunnel: req.Name, Protocol: req.Protocol}
+
+		port, listener, err := s.allocatePort(key)
+		if err != nil {
+			s.closeTunnels(tunnels)
+			return nil, fmt.Errorf("tunnel %q: %w", req.Name, err)
+		}
+
+		tunnels = append(tunnels, &tunnel{
+			TunnelAssignment: protocol.TunnelAssignment{
+				ID:         uint32(i + 1),
+				Name:       req.Name,
+				Protocol:   req.Protocol,
+				PublicPort: port,
+			},
+			key:      key,
+			listener: listener,
+		})
+	}
+
+	return tunnels, nil
+}
+
+// closeTunnels closes the public listeners and returns their ports to
+// the pools, noting when each sticky port was last used.
+func (s *Server) closeTunnels(tunnels []*tunnel) {
+	for _, t := range tunnels {
+		t.listener.Close()
+		s.pools[t.Protocol].Release(t.PublicPort)
+
+		if err := s.reservations.Touch(t.key); err != nil {
+			s.logger.Error("failed to save port reservation", "error", err)
+		}
+	}
 }
 
 // authorized reports whether token matches the configured secret.
@@ -155,10 +255,25 @@ func (s *Server) authorized(token string) bool {
 	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
 }
 
-func (s *Server) reject(conn net.Conn, code protocol.ErrorCode, reason string) {
-	s.logger.Warn("agent rejected", "agentAddr", conn.RemoteAddr(), "code", code, "reason", reason)
-	protocol.WriteMessage(conn, protocol.KindError, protocol.ErrorMessage{
+// reject sends an ERROR reply and gives the agent a moment to read it,
+// since closing the session discards undelivered stream data.
+func (s *Server) reject(session transport.Session, control net.Conn, code protocol.ErrorCode, reason string) {
+	s.logger.Warn("agent rejected", "agentAddr", session.RemoteAddr(), "code", code, "reason", reason)
+
+	err := protocol.WriteMessage(control, protocol.KindError, protocol.ErrorMessage{
 		Code:   code,
 		Reason: reason,
 	})
+	if err != nil {
+		return
+	}
+
+	if cw, ok := control.(interface{ CloseWrite() error }); ok {
+		cw.CloseWrite()
+	}
+
+	select {
+	case <-session.Done():
+	case <-time.After(rejectLinger):
+	}
 }
