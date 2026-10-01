@@ -7,7 +7,6 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/prashunchitkr/khelam/internal/config"
 	"github.com/prashunchitkr/khelam/internal/protocol"
 	"github.com/prashunchitkr/khelam/internal/proxyproto"
 	"github.com/prashunchitkr/khelam/internal/relay"
@@ -15,7 +14,7 @@ import (
 
 // handleStream reads the stream header and relays the tunnelled
 // connection to the tunnel's local service.
-func (a *Agent) handleStream(stream net.Conn, tunnels map[uint32]config.TunnelConfig) {
+func (a *Agent) handleStream(stream net.Conn, tunnels map[uint32]route) {
 	header, err := readStreamHeader(stream)
 	if err != nil {
 		a.logger.Error("invalid stream header", "error", err)
@@ -46,8 +45,15 @@ func (a *Agent) handleStream(stream net.Conn, tunnels map[uint32]config.TunnelCo
 		}
 	}
 
-	a.logger.Debug("stream opened", "tunnel", tc.Name, "clientAddr", header.ClientAddr)
-	relay.Pipe(stream, localConn)
+	tc.stats.active.Add(1)
+	tc.stats.total.Add(1)
+	defer tc.stats.active.Add(-1)
+
+	a.logger.Debug("connection opened", "tunnel", tc.Name, "clientAddr", header.ClientAddr)
+
+	// Reading from the stream is traffic from the public client.
+	counted := &countedConn{Conn: stream, read: &tc.stats.bytesIn, written: &tc.stats.bytesOut}
+	relay.Pipe(counted, localConn)
 }
 
 // readStreamHeader reads the STREAM_OPEN frame that precedes the

@@ -51,6 +51,28 @@ by default, TCP and UDP) in the server's firewall.
 
 ## Agent
 
+### Terminal interface
+
+Run in a terminal, the agent shows a live view instead of JSON logs:
+
+```
+ khelam agent v0.2.0 · tunnel.example.com:31000 · ● connected 2h13m
+ ───────────────────────────────────────────────────────────────────────────
+  TUNNEL      PROTO   PUBLIC ADDRESS             LOCAL             CONNS        IN       OUT
+▸ minecraft   tcp     tunnel.example.com:41000   localhost:25565       3    1.2 MB   48.0 MB
+  bedrock     udp     tunnel.example.com:41000   localhost:19132       5  310.0 kB    2.1 MB
+ ───────────────────────────────────────────────────────────────────────────
+ 21:40:12 DBG connection opened tunnel=minecraft clientAddr=203.0.113.7:51234
+ ───────────────────────────────────────────────────────────────────────────
+ ↑/↓ select · c copy address · l hide log · q quit
+```
+
+`c` copies the selected tunnel's public address to the clipboard (also
+over SSH, in terminals that support OSC 52). While reconnecting, `r`
+retries immediately. `-tui auto|on|off` controls it. The default,
+`auto`, uses it only when stdin and stdout are a terminal, so services,
+containers and pipes keep JSON logs.
+
 ### Tunnels
 
 `-tunnel [NAME=][PROTO://]HOST:PORT`, repeatable:
@@ -188,7 +210,8 @@ macOS and Windows, plus multi-arch images on GHCR.
 |---|---|
 | `cmd/server`, `cmd/agent` | Entry points |
 | `internal/server` | Agent sessions, port pools and reservations, TCP/UDP relaying |
-| `internal/agent` | Registration, reconnects, relaying to local services |
+| `internal/agent` | Registration, reconnects, relaying to local services, live status |
+| `internal/tui` | The agent's terminal interface |
 | `internal/transport` | QUIC sessions, streams and datagrams |
 | `internal/protocol` | Control messages and datagram framing |
 | `internal/auth` | Per-agent tokens |
