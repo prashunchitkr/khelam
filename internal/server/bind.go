@@ -1,11 +1,10 @@
 package server
 
 import (
-	"io"
 	"net"
-	"sync"
 
 	"github.com/hashicorp/yamux"
+	"github.com/prashunchitkr/khelamgg/internal/relay"
 )
 
 // bindConnection opens a yamux stream to the agent and copies traffic
@@ -18,27 +17,5 @@ func (s *Server) bindConnection(session *yamux.Session, publicConn net.Conn) {
 		return
 	}
 
-	copyBidirectional(publicConn, stream)
-}
-
-// copyBidirectional relays traffic between two connections until both
-// directions have finished, then closes both.
-func copyBidirectional(a, b net.Conn) {
-	defer a.Close()
-	defer b.Close()
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		io.Copy(a, b)
-	}()
-
-	go func() {
-		defer wg.Done()
-		io.Copy(b, a)
-	}()
-
-	wg.Wait()
+	relay.Pipe(publicConn, stream)
 }

@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -26,7 +25,7 @@ type ServerConfig struct {
 	//  -port-range 41000-41999
 	PortRangeStart uint32
 
-	// PortRangeEnd is one past the last public port that can be allocated to agents.
+	// PortRangeEnd is the last public port that can be allocated to agents (inclusive).
 	//
 	// Flag: -port-range
 	//
@@ -39,15 +38,11 @@ type ServerConfig struct {
 func GetServerConfig(args []string) (ServerConfig, error) {
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 
-	controlAddress := fs.String("listen", "", "address of the control port (e.g. 0.0.0.0:31000)")
-	portRange := fs.String("port-range", "41000-41999", "range of public ports to allocate (e.g. 41000-41999)")
+	controlAddress := fs.String("listen", "0.0.0.0:31000", "address of the control port")
+	portRange := fs.String("port-range", "41000-41999", "inclusive range of public ports to allocate")
 
 	if err := fs.Parse(args); err != nil {
 		return ServerConfig{}, err
-	}
-
-	if fs.NFlag() == 0 {
-		return ServerConfig{}, errors.New("no flags provided")
 	}
 
 	start, end, err := parsePortRange(*portRange)
@@ -70,8 +65,8 @@ func parsePortRange(rng string) (start, end uint32, err error) {
 		return 0, 0, fmt.Errorf("invalid port range %q: %w", rng, err)
 	}
 
-	if start < 1 || end > 65535 || start >= end {
-		return 0, 0, fmt.Errorf("invalid port range %q: expected START-END with 1 <= START < END <= 65535", rng)
+	if start < 1 || end > 65535 || start > end {
+		return 0, 0, fmt.Errorf("invalid port range %q: expected START-END with 1 <= START <= END <= 65535", rng)
 	}
 
 	return start, end, nil

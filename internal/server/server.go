@@ -83,6 +83,36 @@ func (s *Server) closeSessions() {
 	}
 }
 
+// allocatePublicListener takes ports from the pool until one can be
+// bound. Ports that fail to bind (e.g. held by another process) go to
+// the back of the pool, so a single bad port cannot block every
+// registration.
+func (s *Server) allocatePublicListener() (uint32, net.Listener, error) {
+	attempts := s.portPool.Free()
+	if attempts == 0 {
+		return 0, nil, errors.New("no public ports available")
+	}
+
+	var lastErr error
+	for range attempts {
+		port, err := s.portPool.Allocate()
+		if err != nil {
+			return 0, nil, err
+		}
+
+		listener, err := openPortListener(port)
+		if err == nil {
+			return port, listener, nil
+		}
+
+		s.portPool.Release(port)
+		s.logger.Warn("public port unavailable, trying next", "port", port, "error", err)
+		lastErr = err
+	}
+
+	return 0, nil, fmt.Errorf("no bindable public port: %w", lastErr)
+}
+
 func openPortListener(port uint32) (net.Listener, error) {
 	listener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {

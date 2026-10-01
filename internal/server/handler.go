@@ -36,18 +36,8 @@ func (s *Server) handleAgentConnection(conn net.Conn) {
 
 	s.logger.Info("agent connected", "agentName", register.Name, "agentAddr", conn.RemoteAddr())
 
-	port, err := s.portPool.Allocate()
+	port, publicListener, err := s.allocatePublicListener()
 	if err != nil {
-		s.logger.Error("no port available", "agentName", register.Name, "agentAddr", conn.RemoteAddr(), "error", err)
-		protocol.WriteMessage(conn, protocol.KindError, protocol.ErrorMessage{
-			Reason: "no port available",
-		})
-		return
-	}
-
-	publicListener, err := openPortListener(port)
-	if err != nil {
-		s.portPool.Release(port)
 		s.logger.Error("error allocating port", "agentName", register.Name, "agentAddr", conn.RemoteAddr(), "error", err)
 		protocol.WriteMessage(conn, protocol.KindError, protocol.ErrorMessage{
 			Reason: "error allocating port",
