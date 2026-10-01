@@ -2,13 +2,13 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"sync"
 
-	"github.com/hashicorp/yamux"
 	"github.com/prashunchitkr/khelamgg/internal/config"
 )
 
@@ -25,10 +25,10 @@ type Server struct {
 	cfg      config.ServerConfig
 	portPool *PortPool
 
-	mu       sync.Mutex
-	sessions map[*yamux.Session]struct{}
-	closing  bool
-	wg       sync.WaitGroup
+	// handshakeSlots holds one token per connection still registering.
+	handshakeSlots chan struct{}
+
+	wg sync.WaitGroup
 }
 
 func New(options Options) *Server {
@@ -36,7 +36,8 @@ func New(options Options) *Server {
 		logger:   options.Logger,
 		cfg:      options.Cfg,
 		portPool: NewPortPool(options.Cfg.PortRangeStart, options.Cfg.PortRangeEnd),
-		sessions: make(map[*yamux.Session]struct{}),
+
+		handshakeSlots: make(chan struct{}, maxPendingHandshakes),
 	}
 }
 
@@ -53,17 +54,34 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Serve accepts agents on listener until ctx is cancelled, then shuts
 // down all active agent tunnels before returning. Serve takes ownership
-// of listener.
+// of listener and wraps it in TLS when a certificate is configured.
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	defer listener.Close()
 
-	s.logger.Info("server accepting clients", "address", listener.Addr().String())
+	useTLS := s.cfg.TLSCertFile != ""
+	if useTLS {
+		cert, err := tls.LoadX509KeyPair(s.cfg.TLSCertFile, s.cfg.TLSKeyFile)
+		if err != nil {
+			return fmt.Errorf("cannot load TLS certificate: %w", err)
+		}
 
-	go func() {
-		<-ctx.Done()
-		listener.Close()
-		s.closeSessions()
-	}()
+		listener = tls.NewListener(listener, &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS13,
+		})
+	}
+
+	switch {
+	case s.cfg.Token == "":
+		s.logger.Warn("authentication disabled: any agent may register")
+	case !useTLS:
+		s.logger.Warn("TLS disabled: agent tokens are sent in plaintext")
+	}
+
+	s.logger.Info("server accepting clients", "address", listener.Addr().String(), "tls", useTLS)
+
+	stop := context.AfterFunc(ctx, func() { listener.Close() })
+	defer stop()
 
 	for {
 		agentConn, err := listener.Accept()
@@ -75,23 +93,20 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 			continue
 		}
 
+		select {
+		case s.handshakeSlots <- struct{}{}:
+		default:
+			s.logger.Warn("too many pending handshakes, dropping agent connection", "agentAddr", agentConn.RemoteAddr())
+			agentConn.Close()
+			continue
+		}
+
 		s.wg.Add(1)
-		go s.handleAgentConnection(agentConn)
+		go s.handleAgentConnection(ctx, agentConn)
 	}
 
 	s.wg.Wait()
 	return nil
-}
-
-func (s *Server) closeSessions() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.closing = true
-
-	for session := range s.sessions {
-		session.Close()
-	}
 }
 
 // allocatePublicListener takes ports from the pool until one can be
@@ -122,28 +137,6 @@ func (s *Server) allocatePublicListener() (uint32, net.Listener, error) {
 	}
 
 	return 0, nil, fmt.Errorf("no bindable public port: %w", lastErr)
-}
-
-// trackSession registers session for shutdown. It returns false if the
-// server is already shutting down, in which case the caller must close
-// the session itself.
-func (s *Server) trackSession(session *yamux.Session) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.closing {
-		return false
-	}
-
-	s.sessions[session] = struct{}{}
-	return true
-}
-
-func (s *Server) untrackSession(session *yamux.Session) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	delete(s.sessions, session)
 }
 
 func openPortListener(port uint32) (net.Listener, error) {

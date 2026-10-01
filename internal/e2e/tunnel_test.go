@@ -54,8 +54,8 @@ func startEcho(t *testing.T) string {
 
 // startServer serves agents on listenAddr ("127.0.0.1:0" for any port)
 // and returns the bound address and a channel that receives Serve's
-// result once ctx is cancelled.
-func startServer(t *testing.T, ctx context.Context, listenAddr string, portStart, portEnd uint32) (string, <-chan error) {
+// result once ctx is cancelled. opts may adjust the config.
+func startServer(t *testing.T, ctx context.Context, listenAddr string, portStart, portEnd uint32, opts ...func(*config.ServerConfig)) (string, <-chan error) {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", listenAddr)
@@ -63,44 +63,83 @@ func startServer(t *testing.T, ctx context.Context, listenAddr string, portStart
 		t.Fatal(err)
 	}
 
+	cfg := config.ServerConfig{
+		PortRangeStart: portStart,
+		PortRangeEnd:   portEnd,
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	srv := server.New(server.Options{
 		Logger: testLogger(t).With("component", "server"),
-		Cfg: config.ServerConfig{
-			PortRangeStart: portStart,
-			PortRangeEnd:   portEnd,
-		},
+		Cfg:    cfg,
 	})
 
 	done := make(chan error, 1)
-	go func() { done <- srv.Serve(ctx, ln) }()
+	finished := make(chan struct{})
+	go func() {
+		done <- srv.Serve(ctx, ln)
+		close(finished)
+	}()
+	// The server logs through t, so it must stop before the test ends.
+	t.Cleanup(func() { <-finished })
 
 	return ln.Addr().String(), done
 }
 
 // startAgent runs an agent and returns a channel that receives the
-// public port every time a tunnel is established.
-func startAgent(t *testing.T, ctx context.Context, serverAddr, tunnelAddr string) <-chan uint32 {
+// public port every time a tunnel is established. opts may adjust the
+// config.
+func startAgent(t *testing.T, ctx context.Context, serverAddr, tunnelAddr string, opts ...func(*config.AgentConfig)) <-chan uint32 {
 	t.Helper()
+
+	ports, _ := startAgentWithResult(t, ctx, serverAddr, tunnelAddr, opts...)
+	return ports
+}
+
+// startAgentWithResult is startAgent that also returns a channel
+// receiving Run's result.
+func startAgentWithResult(t *testing.T, ctx context.Context, serverAddr, tunnelAddr string, opts ...func(*config.AgentConfig)) (<-chan uint32, <-chan error) {
+	t.Helper()
+
+	cfg := config.AgentConfig{
+		ServerAddress: serverAddr,
+		TunnelAddress: tunnelAddr,
+		Name:          t.Name(),
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 
 	ports := make(chan uint32, 8)
 	agt := agent.New(agent.Options{
-		Logger: testLogger(t).With("component", "agent"),
-		Cfg: config.AgentConfig{
-			ServerAddress: serverAddr,
-			TunnelAddress: tunnelAddr,
-			Name:          t.Name(),
-		},
+		Logger:   testLogger(t).With("component", "agent"),
+		Cfg:      cfg,
 		OnTunnel: func(port uint32) { ports <- port },
 	})
 
+	result := make(chan error, 1)
 	done := make(chan struct{})
 	go func() {
-		agt.Run(ctx)
+		result <- agt.Run(ctx)
 		close(done)
 	}()
 	t.Cleanup(func() { <-done })
 
-	return ports
+	return ports, result
+}
+
+func waitResult(t *testing.T, result <-chan error) error {
+	t.Helper()
+
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for agent to stop")
+		return nil
+	}
 }
 
 func waitPort(t *testing.T, ports <-chan uint32) uint32 {
