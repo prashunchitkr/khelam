@@ -50,6 +50,7 @@ type Agent struct {
 	logger   *slog.Logger
 	cfg      config.AgentConfig
 	onTunnel func(tunnels []protocol.TunnelAssignment)
+	status   *status
 }
 
 func New(options Options) *Agent {
@@ -57,7 +58,14 @@ func New(options Options) *Agent {
 		logger:   options.Logger,
 		cfg:      options.Cfg,
 		onTunnel: options.OnTunnel,
+		status:   newStatus(options.Cfg),
 	}
+}
+
+// route is where a tunnel's traffic goes, with its counters.
+type route struct {
+	config.TunnelConfig
+	stats *tunnelStats
 }
 
 // RejectedError is returned when the server refuses to register the
@@ -76,7 +84,9 @@ func (e *RejectedError) Error() string {
 // up and returns an error only when retrying cannot help, such as a bad
 // token, an untrusted server certificate, or another agent taking over
 // this agent's ID.
-func (a *Agent) Run(ctx context.Context) error {
+func (a *Agent) Run(ctx context.Context) (err error) {
+	defer func() { a.status.set(StateStopped, err, time.Time{}) }()
+
 	tlsConfig, err := a.tlsConfig()
 	if err != nil {
 		return err
@@ -85,6 +95,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	backoff := minBackoff
 
 	for {
+		a.status.set(StateConnecting, nil, time.Time{})
+
 		established, err := a.runSession(ctx, tlsConfig)
 		if ctx.Err() != nil {
 			return nil
@@ -103,10 +115,18 @@ func (a *Agent) Run(ctx context.Context) error {
 		wait := jitter(backoff)
 		a.logger.Warn("tunnel lost, reconnecting", "error", err, "retryIn", wait)
 
+		// Drop a retry request left over from before this wait.
+		select {
+		case <-a.status.retryNow:
+		default:
+		}
+		a.status.set(StateRetrying, err, time.Now().Add(wait))
+
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-time.After(wait):
+		case <-a.status.retryNow:
 		}
 
 		backoff = min(backoff*2, maxBackoff)
@@ -196,17 +216,21 @@ func (a *Agent) runSession(ctx context.Context, tlsConfig *tls.Config) (establis
 	}
 	defer control.Close()
 
-	tunnels := make(map[uint32]config.TunnelConfig, len(assignments))
+	tunnels := make(map[uint32]route, len(assignments))
 	hasUDP := false
 	for _, assignment := range assignments {
-		for _, tc := range a.cfg.Tunnels {
-			if tc.Name == assignment.Name {
-				tunnels[assignment.ID] = tc
-				hasUDP = hasUDP || tc.Protocol == protocol.ProtocolUDP
-				a.logger.Info("tunnel established", "tunnel", tc.Name, "protocol", tc.Protocol, "publicPort", assignment.PublicPort, "localAddr", tc.LocalAddress)
-			}
+		stats, ok := a.status.byName[assignment.Name]
+		if !ok {
+			continue
 		}
+
+		stats.publicPort.Store(assignment.PublicPort)
+		tunnels[assignment.ID] = route{TunnelConfig: stats.cfg, stats: stats}
+		hasUDP = hasUDP || stats.cfg.Protocol == protocol.ProtocolUDP
+		a.logger.Info("tunnel established", "tunnel", stats.cfg.Name, "protocol", stats.cfg.Protocol, "publicPort", assignment.PublicPort, "localAddr", stats.cfg.LocalAddress)
 	}
+
+	a.status.set(StateConnected, nil, time.Time{})
 
 	if a.onTunnel != nil {
 		a.onTunnel(assignments)

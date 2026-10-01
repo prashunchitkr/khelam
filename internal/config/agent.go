@@ -86,6 +86,12 @@ type AgentConfig struct {
 	//
 	// Flag: -proxy-protocol
 	ProxyProtocol bool
+
+	// TUI selects the interactive terminal interface: "auto" (when
+	// running in a terminal), "on" or "off".
+	//
+	// Flag: -tui
+	TUI string
 }
 
 // agentFile is the YAML config file format for the agent. Field names
@@ -131,6 +137,7 @@ func GetAgentConfig(args []string) (AgentConfig, error) {
 	tlsCA := fs.String("tls-ca", "", "CA certificate file to verify the server")
 	fingerprint := fs.String("fingerprint", "", "pin the server certificate by fingerprint (sha256:<hex>)")
 	proxyProtocol := fs.Bool("proxy-protocol", false, "send a PROXY protocol v2 header to local TCP services")
+	tui := fs.String("tui", "auto", "interactive terminal interface: auto (when in a terminal), on, or off")
 
 	if err := fs.Parse(args); err != nil {
 		return AgentConfig{}, err
@@ -173,6 +180,12 @@ func GetAgentConfig(args []string) (AgentConfig, error) {
 		}
 	}
 
+	switch *tui {
+	case "auto", "on", "off":
+	default:
+		return AgentConfig{}, fmt.Errorf("-tui must be auto, on or off, not %q", *tui)
+	}
+
 	if opts.Server == "" {
 		return AgentConfig{}, errors.New("a server address is required (-server or \"server\" in the config file)")
 	}
@@ -204,6 +217,7 @@ func GetAgentConfig(args []string) (AgentConfig, error) {
 		TLSCAFile:     opts.TLSCA,
 		Fingerprint:   opts.Fingerprint,
 		ProxyProtocol: opts.ProxyProtocol,
+		TUI:           *tui,
 	}
 
 	return cfg, nil

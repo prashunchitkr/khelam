@@ -109,6 +109,14 @@ func agentConfig(t *testing.T, srv testServer, tunnels ...string) config.AgentCo
 func startAgent(t *testing.T, ctx context.Context, cfg config.AgentConfig) (<-chan []protocol.TunnelAssignment, <-chan error) {
 	t.Helper()
 
+	_, assignments, result := startAgentHandle(t, ctx, cfg)
+	return assignments, result
+}
+
+// startAgentHandle is startAgent that also returns the agent itself.
+func startAgentHandle(t *testing.T, ctx context.Context, cfg config.AgentConfig) (*agent.Agent, <-chan []protocol.TunnelAssignment, <-chan error) {
+	t.Helper()
+
 	assignments := make(chan []protocol.TunnelAssignment, 8)
 	agt := agent.New(agent.Options{
 		Logger:   testLogger(t).With("component", "agent"),
@@ -124,7 +132,7 @@ func startAgent(t *testing.T, ctx context.Context, cfg config.AgentConfig) (<-ch
 	}()
 	t.Cleanup(func() { <-done })
 
-	return assignments, result
+	return agt, assignments, result
 }
 
 func waitTunnels(t *testing.T, assignments <-chan []protocol.TunnelAssignment) []protocol.TunnelAssignment {

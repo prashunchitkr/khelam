@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/prashunchitkr/khelam/internal/config"
 	"github.com/prashunchitkr/khelam/internal/protocol"
 	"github.com/prashunchitkr/khelam/internal/transport"
 )
@@ -24,7 +23,7 @@ const (
 // service sees distinct clients and replies reach the right one.
 type udpForwarder struct {
 	session transport.Session
-	tunnels map[uint32]config.TunnelConfig
+	tunnels map[uint32]route
 	logger  *slog.Logger
 
 	mu    sync.Mutex
@@ -36,7 +35,8 @@ type flowKey struct {
 }
 
 type udpFlow struct {
-	conn net.Conn
+	conn  net.Conn
+	stats *tunnelStats
 	// lastSeen is the Unix nanosecond time of the latest packet in
 	// either direction.
 	lastSeen atomic.Int64
@@ -44,7 +44,7 @@ type udpFlow struct {
 
 func (f *udpFlow) touch() { f.lastSeen.Store(time.Now().UnixNano()) }
 
-func newUDPForwarder(session transport.Session, tunnels map[uint32]config.TunnelConfig, logger *slog.Logger) *udpForwarder {
+func newUDPForwarder(session transport.Session, tunnels map[uint32]route, logger *slog.Logger) *udpForwarder {
 	return &udpForwarder{
 		session: session,
 		tunnels: tunnels,
@@ -78,6 +78,7 @@ func (f *udpForwarder) run() {
 		}
 
 		flow.touch()
+		flow.stats.bytesIn.Add(int64(len(payload)))
 		flow.conn.Write(payload)
 	}
 }
@@ -104,8 +105,11 @@ func (f *udpForwarder) flowFor(key flowKey) *udpFlow {
 		return nil
 	}
 
-	flow := &udpFlow{conn: conn}
+	flow := &udpFlow{conn: conn, stats: tc.stats}
 	f.flows[key] = flow
+	tc.stats.active.Add(1)
+	tc.stats.total.Add(1)
+	f.logger.Debug("UDP flow opened", "tunnel", tc.Name, "flowID", key.flowID)
 	go f.readReplies(key, flow)
 
 	return flow
@@ -123,6 +127,7 @@ func (f *udpForwarder) readReplies(key flowKey, flow *udpFlow) {
 			return
 		}
 		flow.touch()
+		flow.stats.bytesOut.Add(int64(n))
 
 		datagram := protocol.AppendDatagram(make([]byte, 0, protocol.DatagramHeaderSize+n), key.tunnelID, key.flowID, buf[:n])
 		if err := f.session.SendDatagram(datagram); err != nil {
@@ -135,8 +140,10 @@ func (f *udpForwarder) readReplies(key flowKey, flow *udpFlow) {
 	}
 }
 
+// remove closes a flow. It runs once per flow, when its reader exits.
 func (f *udpForwarder) remove(key flowKey, flow *udpFlow) {
 	flow.conn.Close()
+	flow.stats.active.Add(-1)
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
