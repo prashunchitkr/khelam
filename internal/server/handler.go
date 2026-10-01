@@ -130,7 +130,8 @@ func (s *Server) register(ctx context.Context, session transport.Session) (net.C
 		return fail()
 	}
 
-	if !s.authorized(register.Token) {
+	principal, ok := s.authenticate(register.Token)
+	if !ok {
 		s.reject(session, control, protocol.ErrUnauthorized, "invalid token")
 		return fail()
 	}
@@ -140,7 +141,14 @@ func (s *Server) register(ctx context.Context, session transport.Session) (net.C
 		return fail()
 	}
 
-	entry, err := s.claimAgent(register.AgentID, session)
+	// Scope the agent ID to its token, so holders of one token can
+	// neither take over nor reclaim the ports of another token's agents.
+	// From here on AgentID is the scoped form.
+	if principal != "" {
+		register.AgentID = principal + "/" + register.AgentID
+	}
+
+	entry, err := s.claimAgent(register.AgentID, principal, session)
 	if err != nil {
 		s.reject(session, control, protocol.ErrNoCapacity, err.Error())
 		return fail()
@@ -242,17 +250,23 @@ func (s *Server) closeTunnels(tunnels []*tunnel) {
 	}
 }
 
-// authorized reports whether token matches the configured secret.
-// Both sides are hashed first so the comparison is constant time
-// regardless of length.
-func (s *Server) authorized(token string) bool {
-	if s.cfg.Token == "" {
-		return true
+// authenticate checks token against the tokens file, or else the
+// shared secret, and returns the name of the matching token (empty for
+// the shared secret or when authentication is disabled).
+func (s *Server) authenticate(token string) (principal string, ok bool) {
+	if s.tokens != nil {
+		return s.tokens.Authenticate(token)
 	}
 
+	if s.cfg.Token == "" {
+		return "", true
+	}
+
+	// Both sides are hashed first so the comparison is constant time
+	// regardless of length.
 	got := sha256.Sum256([]byte(token))
 	want := sha256.Sum256([]byte(s.cfg.Token))
-	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
+	return "", subtle.ConstantTimeCompare(got[:], want[:]) == 1
 }
 
 // reject sends an ERROR reply and gives the agent a moment to read it,

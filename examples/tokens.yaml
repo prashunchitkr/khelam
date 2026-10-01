@@ -1,0 +1,14 @@
+# khelam server tokens file. Use with: khelam-server -tokens-file tokens.yaml
+#
+# Each agent token is stored only as a SHA-256 hash, so this file holds
+# no secrets. Generate entries with:
+#   khelam-server gen-token NAME
+# and reload a running server with SIGHUP (systemctl reload khelam-server).
+# Removing an entry disconnects that token's agents on reload.
+#
+# Agents are scoped to their token: an agent can never take over, or get
+# the ports of, an agent registered under a different token.
+
+tokens:
+  - name: alice
+    sha256: 0000000000000000000000000000000000000000000000000000000000000000

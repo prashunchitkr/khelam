@@ -1,0 +1,56 @@
+# Release builds: goreleaser release --clean (run by .github/workflows/release.yml on v* tags).
+# Local dry run:  goreleaser release --snapshot --clean
+version: 2
+
+project_name: khelam
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - &build
+    id: server
+    main: ./cmd/server
+    binary: khelam-server
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/prashunchitkr/khelamgg/internal/version.Version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64, arm]
+    goarm: ["7"]
+    ignore:
+      - goos: darwin
+        goarch: arm
+      - goos: windows
+        goarch: arm
+  - <<: *build
+    id: agent
+    main: ./cmd/agent
+    binary: khelam-agent
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}
+    files:
+      - README.md
+      - examples/*
+      - packaging/systemd/*
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs"
+      - "^test"
+      - "^chore"

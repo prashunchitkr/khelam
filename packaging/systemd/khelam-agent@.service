@@ -1,0 +1,55 @@
+# khelam tunnel agent, one instance per config file.
+#
+# For an instance named "home":
+#   install -m 755 khelam-agent /usr/local/bin/
+#   install -m 644 khelam-agent@.service /etc/systemd/system/
+#   install -m 644 agent.yaml /etc/khelam/agent-home.yaml   # no token in this file
+#   install -m 600 /dev/stdin /etc/khelam/agent-home.token <<< "khelam_..."
+#   systemctl enable --now khelam-agent@home
+#
+# The token is passed as a systemd credential, so it is readable only by
+# this service and never appears in the process list.
+
+[Unit]
+Description=khelam tunnel agent (%i)
+Documentation=https://github.com/prashunchitkr/khelam
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+DynamicUser=yes
+StateDirectory=khelam-agent/%i
+LoadCredential=token:/etc/khelam/agent-%i.token
+ExecStart=/usr/local/bin/khelam-agent \
+    -config /etc/khelam/agent-%i.yaml \
+    -id-file /var/lib/khelam-agent/%i/agent-id \
+    -token-file %d/token
+Restart=on-failure
+RestartSec=5s
+# Exit status 3 means the agent cannot recover by itself (bad config,
+# rejected token, untrusted server), so restarting would only loop.
+RestartPreventExitStatus=3
+
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

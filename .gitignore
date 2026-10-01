@@ -22,3 +22,6 @@
 go.work
 
 build
+
+# goreleaser output
+dist

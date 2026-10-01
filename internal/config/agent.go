@@ -1,17 +1,20 @@
 package config
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/prashunchitkr/khelamgg/internal/protocol"
+	"go.yaml.in/yaml/v3"
 )
 
 // TunnelConfig describes one local service to expose.
@@ -61,7 +64,7 @@ type AgentConfig struct {
 
 	// Token is the shared secret presented to the server.
 	//
-	// Flag: -token (default: $KHELAM_TOKEN)
+	// Flags: -token, -token-file (default: $KHELAM_TOKEN)
 	Token string
 
 	// TLSCAFile is a PEM file of CA certificates used to verify the
@@ -85,18 +88,46 @@ type AgentConfig struct {
 	ProxyProtocol bool
 }
 
-// GetAgentConfig parses CLI args for the agent
+// agentFile is the YAML config file format for the agent. Field names
+// mirror the flags.
+type agentFile struct {
+	Server        string       `yaml:"server"`
+	Name          string       `yaml:"name"`
+	IDFile        string       `yaml:"id_file"`
+	Token         string       `yaml:"token"`
+	TokenFile     string       `yaml:"token_file"`
+	TLSCA         string       `yaml:"tls_ca"`
+	Fingerprint   string       `yaml:"fingerprint"`
+	ProxyProtocol bool         `yaml:"proxy_protocol"`
+	Tunnels       []fileTunnel `yaml:"tunnels"`
+}
+
+type fileTunnel struct {
+	Name     string `yaml:"name"`
+	Protocol string `yaml:"protocol"`
+	Local    string `yaml:"local"`
+}
+
+// GetAgentConfig parses CLI args for the agent. Values come from, in
+// increasing priority: built-in defaults, the -config file, and flags
+// given explicitly on the command line.
 func GetAgentConfig(args []string) (AgentConfig, error) {
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 
 	hostname, _ := os.Hostname()
+	defaults := agentFile{
+		Name:   hostname,
+		IDFile: filepath.Join(defaultStateDir("agent"), "agent-id"),
+	}
 
 	var tunnels tunnelFlags
+	configFile := fs.String("config", "", "YAML config file; flags given on the command line override it")
 	serverAddress := fs.String("server", "", "address of the proxy server (e.g. 192.168.1.2:31000)")
-	fs.Var(&tunnels, "tunnel", "local service to expose as [NAME=][PROTO://]HOST:PORT; repeatable (e.g. bedrock=udp://localhost:19132)")
-	name := fs.String("name", hostname, "name of this agent")
-	idFile := fs.String("id-file", filepath.Join(defaultStateDir("agent"), "agent-id"), "file holding this agent's ID (created if missing)")
-	token := fs.String("token", "", "shared secret to present to the server (default $"+TokenEnv+")")
+	fs.Var(&tunnels, "tunnel", "local service to expose as [NAME=][PROTO://]HOST:PORT; repeatable, replaces the config file's tunnels (e.g. bedrock=udp://localhost:19132)")
+	name := fs.String("name", defaults.Name, "name of this agent")
+	idFile := fs.String("id-file", defaults.IDFile, "file holding this agent's ID (created if missing)")
+	token := fs.String("token", "", "token to present to the server (default $"+TokenEnv+")")
+	tokenFile := fs.String("token-file", "", "file containing the token to present to the server")
 	tlsCA := fs.String("tls-ca", "", "CA certificate file to verify the server")
 	fingerprint := fs.String("fingerprint", "", "pin the server certificate by fingerprint (sha256:<hex>)")
 	proxyProtocol := fs.Bool("proxy-protocol", false, "send a PROXY protocol v2 header to local TCP services")
@@ -105,41 +136,151 @@ func GetAgentConfig(args []string) (AgentConfig, error) {
 		return AgentConfig{}, err
 	}
 
-	// Read the env fallback after parsing so the secret is never shown
-	// as a flag default in -h output.
-	if *token == "" {
-		*token = os.Getenv(TokenEnv)
+	opts := defaults
+	if *configFile != "" {
+		if err := loadAgentFile(*configFile, &opts); err != nil {
+			return AgentConfig{}, err
+		}
 	}
 
-	if *serverAddress == "" {
-		return AgentConfig{}, errors.New("-server is required")
+	set := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
+	override := func(flagName string, dst *string, value string) {
+		if set[flagName] {
+			*dst = value
+		}
+	}
+	override("server", &opts.Server, *serverAddress)
+	override("name", &opts.Name, *name)
+	override("id-file", &opts.IDFile, *idFile)
+	override("tls-ca", &opts.TLSCA, *tlsCA)
+	override("fingerprint", &opts.Fingerprint, *fingerprint)
+	if set["proxy-protocol"] {
+		opts.ProxyProtocol = *proxyProtocol
+	}
+	// A token given on the command line replaces the file's token in
+	// either form.
+	if set["token"] || set["token-file"] {
+		opts.Token, opts.TokenFile = *token, *tokenFile
 	}
 
-	if len(tunnels) == 0 {
-		return AgentConfig{}, errors.New("at least one -tunnel is required")
+	tunnelConfigs := []TunnelConfig(tunnels)
+	if len(tunnelConfigs) == 0 {
+		var err error
+		if tunnelConfigs, err = opts.tunnelConfigs(); err != nil {
+			return AgentConfig{}, err
+		}
 	}
 
-	if *tlsCA != "" && *fingerprint != "" {
-		return AgentConfig{}, errors.New("-tls-ca and -fingerprint are mutually exclusive")
+	if opts.Server == "" {
+		return AgentConfig{}, errors.New("a server address is required (-server or \"server\" in the config file)")
 	}
 
-	agentID, err := loadOrCreateAgentID(*idFile)
+	if len(tunnelConfigs) == 0 {
+		return AgentConfig{}, errors.New("at least one tunnel is required (-tunnel or \"tunnels\" in the config file)")
+	}
+
+	if opts.TLSCA != "" && opts.Fingerprint != "" {
+		return AgentConfig{}, errors.New("tls-ca and fingerprint are mutually exclusive")
+	}
+
+	resolvedToken, err := resolveToken(opts.Token, opts.TokenFile)
+	if err != nil {
+		return AgentConfig{}, err
+	}
+
+	agentID, err := loadOrCreateAgentID(opts.IDFile)
 	if err != nil {
 		return AgentConfig{}, err
 	}
 
 	cfg := AgentConfig{
-		ServerAddress: *serverAddress,
-		Tunnels:       tunnels,
-		Name:          *name,
+		ServerAddress: opts.Server,
+		Tunnels:       tunnelConfigs,
+		Name:          opts.Name,
 		AgentID:       agentID,
-		Token:         *token,
-		TLSCAFile:     *tlsCA,
-		Fingerprint:   *fingerprint,
-		ProxyProtocol: *proxyProtocol,
+		Token:         resolvedToken,
+		TLSCAFile:     opts.TLSCA,
+		Fingerprint:   opts.Fingerprint,
+		ProxyProtocol: opts.ProxyProtocol,
 	}
 
 	return cfg, nil
+}
+
+// loadAgentFile decodes the config file at path over opts. Unknown keys
+// are an error, to catch typos. Relative paths in the file are resolved
+// against the file's directory.
+func loadAgentFile(path string, opts *agentFile) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("cannot read config file: %w", err)
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(opts); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("invalid config file %s: %w", path, err)
+	}
+
+	dir := filepath.Dir(path)
+	for _, p := range []*string{&opts.IDFile, &opts.TokenFile, &opts.TLSCA} {
+		if *p != "" && !filepath.IsAbs(*p) {
+			*p = filepath.Join(dir, *p)
+		}
+	}
+
+	return nil
+}
+
+// tunnelConfigs validates the config file's tunnels, applying the same
+// defaults as -tunnel.
+func (f agentFile) tunnelConfigs() ([]TunnelConfig, error) {
+	var tunnels tunnelFlags
+
+	for i, t := range f.Tunnels {
+		if t.Local == "" {
+			return nil, fmt.Errorf("config file tunnel %d: \"local\" is required", i+1)
+		}
+
+		spec := t.Local
+		if t.Protocol != "" {
+			spec = t.Protocol + "://" + spec
+		}
+		if t.Name != "" {
+			spec = t.Name + "=" + spec
+		}
+
+		if err := tunnels.Set(spec); err != nil {
+			return nil, fmt.Errorf("config file tunnel %d: %w", i+1, err)
+		}
+	}
+
+	return tunnels, nil
+}
+
+// resolveToken returns the token given directly, read from tokenFile,
+// or from the environment, in that order.
+func resolveToken(token, tokenFile string) (string, error) {
+	if token != "" && tokenFile != "" {
+		return "", errors.New("token and token-file are mutually exclusive")
+	}
+
+	if tokenFile != "" {
+		data, err := os.ReadFile(tokenFile)
+		if err != nil {
+			return "", fmt.Errorf("cannot read token file: %w", err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+
+	// Read the env fallback last so the secret is never shown as a flag
+	// default in -h output.
+	if token == "" {
+		token = os.Getenv(TokenEnv)
+	}
+	return token, nil
 }
 
 // tunnelFlags collects repeated -tunnel flags.

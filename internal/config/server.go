@@ -47,6 +47,12 @@ type ServerConfig struct {
 	// Flag: -token (default: $KHELAM_TOKEN)
 	Token string
 
+	// TokensFile is a YAML file of per-agent tokens (see auth.Entry). It
+	// replaces Token, and is reloaded on SIGHUP.
+	//
+	// Flag: -tokens-file
+	TokensFile string
+
 	// TLSCertFile and TLSKeyFile set the server certificate. Both or
 	// neither must be set. When neither is set, a self-signed certificate
 	// is generated and kept in StateDir.
@@ -79,6 +85,7 @@ func GetServerConfig(args []string) (ServerConfig, error) {
 	controlAddress := fs.String("listen", "0.0.0.0:31000", "UDP address for agent connections")
 	portRange := fs.String("port-range", "41000-41999", "inclusive range of public ports to allocate")
 	token := fs.String("token", "", "shared secret agents must present (default $"+TokenEnv+")")
+	tokensFile := fs.String("tokens-file", "", "YAML file of per-agent tokens, reloaded on SIGHUP (replaces -token)")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate file (default: self-signed, kept in -state-dir)")
 	tlsKey := fs.String("tls-key", "", "TLS private key file")
 	stateDir := fs.String("state-dir", defaultStateDir("server"), "directory for port reservations and the self-signed certificate")
@@ -99,6 +106,10 @@ func GetServerConfig(args []string) (ServerConfig, error) {
 		return ServerConfig{}, err
 	}
 
+	if *token != "" && *tokensFile != "" {
+		return ServerConfig{}, errors.New("-token and -tokens-file are mutually exclusive")
+	}
+
 	if (*tlsCert == "") != (*tlsKey == "") {
 		return ServerConfig{}, errors.New("-tls-cert and -tls-key must be set together")
 	}
@@ -112,6 +123,7 @@ func GetServerConfig(args []string) (ServerConfig, error) {
 		PortRangeStart:    start,
 		PortRangeEnd:      end,
 		Token:             *token,
+		TokensFile:        *tokensFile,
 		TLSCertFile:       *tlsCert,
 		TLSKeyFile:        *tlsKey,
 		StateDir:          *stateDir,

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prashunchitkr/khelamgg/internal/auth"
 	"github.com/prashunchitkr/khelamgg/internal/config"
 	"github.com/prashunchitkr/khelamgg/internal/protocol"
 	"github.com/prashunchitkr/khelamgg/internal/tlsutil"
@@ -30,6 +31,7 @@ type Server struct {
 	logger       *slog.Logger
 	cfg          config.ServerConfig
 	cert         tls.Certificate
+	tokens       *auth.Store
 	pools        map[protocol.Protocol]*PortPool
 	reservations *Reservations
 
@@ -45,8 +47,11 @@ type Server struct {
 // agentEntry marks an agent ID as connected. released is closed once
 // that session has given back all of its ports.
 type agentEntry struct {
-	session  transport.Session
-	released chan struct{}
+	session transport.Session
+	// principal is the name of the token the agent registered with, or
+	// empty without a tokens file.
+	principal string
+	released  chan struct{}
 }
 
 // New loads the server certificate and port reservations.
@@ -67,10 +72,19 @@ func New(options Options) (*Server, error) {
 		return nil, err
 	}
 
+	var tokens *auth.Store
+	if cfg.TokensFile != "" {
+		tokens, err = auth.Load(cfg.TokensFile)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &Server{
 		logger:       options.Logger,
 		cfg:          cfg,
 		cert:         cert,
+		tokens:       tokens,
 		reservations: reservations,
 		pools: map[protocol.Protocol]*PortPool{
 			protocol.ProtocolTCP: NewPortPool(cfg.PortRangeStart, cfg.PortRangeEnd),
@@ -133,7 +147,7 @@ func (s *Server) Serve(ctx context.Context, pc net.PacketConn) error {
 	}
 	defer listener.Close()
 
-	if s.cfg.Token == "" {
+	if s.cfg.Token == "" && s.tokens == nil {
 		s.logger.Warn("authentication disabled: any agent may register")
 	}
 	if s.cfg.StateDir == "" {
@@ -171,8 +185,8 @@ func (s *Server) Serve(ctx context.Context, pc net.PacketConn) error {
 // claimAgent registers session as the live connection for agentID. If
 // another session holds the ID, it is closed and its ports released
 // first, so a reconnecting agent can reclaim its sticky ports.
-func (s *Server) claimAgent(agentID string, session transport.Session) (*agentEntry, error) {
-	entry := &agentEntry{session: session, released: make(chan struct{})}
+func (s *Server) claimAgent(agentID, principal string, session transport.Session) (*agentEntry, error) {
+	entry := &agentEntry{session: session, principal: principal, released: make(chan struct{})}
 
 	for {
 		s.mu.Lock()
@@ -205,6 +219,31 @@ func (s *Server) releaseAgent(agentID string, entry *agentEntry) {
 	s.mu.Unlock()
 
 	close(entry.released)
+}
+
+// ReloadTokens re-reads the tokens file and disconnects agents whose
+// token was removed. Without a tokens file it does nothing.
+func (s *Server) ReloadTokens() error {
+	if s.tokens == nil {
+		return nil
+	}
+
+	if err := s.tokens.Reload(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for agentID, entry := range s.agents {
+		if !s.tokens.Has(entry.principal) {
+			s.logger.Info("disconnecting agent with revoked token", "agentID", agentID, "token", entry.principal)
+			entry.session.Close(transport.CloseNormal, "token revoked")
+		}
+	}
+
+	s.logger.Info("tokens reloaded")
+	return nil
 }
 
 // allocatePort finds a public port for the tunnel identified by key and

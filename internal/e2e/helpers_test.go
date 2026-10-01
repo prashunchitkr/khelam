@@ -27,6 +27,7 @@ func testLogger(t *testing.T) *slog.Logger {
 }
 
 type testServer struct {
+	srv         *server.Server
 	addr        string
 	fingerprint string
 	// done receives Serve's result once its context is cancelled.
@@ -68,7 +69,7 @@ func startServer(t *testing.T, ctx context.Context, listenAddr string, portStart
 	// The server logs through t, so it must stop before the test ends.
 	t.Cleanup(func() { <-finished })
 
-	return testServer{addr: pc.LocalAddr().String(), fingerprint: srv.Fingerprint(), done: done}
+	return testServer{srv: srv, addr: pc.LocalAddr().String(), fingerprint: srv.Fingerprint(), done: done}
 }
 
 func newAgentID(t *testing.T) string {
