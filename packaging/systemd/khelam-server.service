@@ -1,0 +1,57 @@
+# khelam tunnel server.
+#
+# Install:
+#   install -m 755 khelam-server /usr/local/bin/
+#   install -m 644 khelam-server.service /etc/systemd/system/
+#   install -d /etc/khelam
+#   khelam-server gen-token my-agent   # paste the entry into /etc/khelam/tokens.yaml
+#   systemctl enable --now khelam-server
+#
+# The certificate fingerprint for agents is in the startup log:
+#   journalctl -u khelam-server | grep fingerprint
+# After editing tokens.yaml:
+#   systemctl reload khelam-server
+
+[Unit]
+Description=khelam tunnel server
+Documentation=https://github.com/prashunchitkr/khelam
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+DynamicUser=yes
+StateDirectory=khelam-server
+ExecStart=/usr/local/bin/khelam-server \
+    -listen 0.0.0.0:31000 \
+    -port-range 41000-41999 \
+    -state-dir /var/lib/khelam-server \
+    -tokens-file /etc/khelam/tokens.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+# Public ports below 1024 need this capability:
+#AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

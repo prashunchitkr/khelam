@@ -1,107 +1,98 @@
 package main
 
 import (
-	"io"
+	"context"
+	"fmt"
 	"log/slog"
-	"net"
 	"os"
+	"os/signal"
+	"syscall"
 
-	"github.com/hashicorp/yamux"
+	"github.com/prashunchitkr/khelam/internal/auth"
+	"github.com/prashunchitkr/khelam/internal/config"
+	"github.com/prashunchitkr/khelam/internal/logger"
+	"github.com/prashunchitkr/khelam/internal/server"
+	"github.com/prashunchitkr/khelam/internal/version"
 )
-
-const (
-	PublicListenAddr = "0.0.0.0:3100"
-	ClientListenAddr = "0.0.0.0:3101"
-)
-
-type khelamServer struct {
-	logger        slog.Logger
-	session       *yamux.Session
-	publicListner net.Listener
-}
 
 func main() {
-	logHandler := slog.NewTextHandler(os.Stdout, nil)
-	logger := slog.New(logHandler)
-
-	clientListener, err := net.Listen("tcp", ClientListenAddr)
-	if err != nil {
-		logger.Error("Cannot listen for client", "clientAddr", ClientListenAddr)
-		os.Exit(-1)
-	}
-
-	logger.Info("Listening for clients", "clientAddr", ClientListenAddr)
-
-	rawClientConn, err := clientListener.Accept()
-	if err != nil {
-		logger.Error("Failed to listen to client connection", "clientAddr", rawClientConn.RemoteAddr())
-		os.Exit(-2)
-	}
-	logger.Info("Client connected", "clientAddr", rawClientConn.RemoteAddr())
-
-	session, err := yamux.Server(rawClientConn, nil)
-	if err != nil {
-		logger.Error("Cannot start yamux server")
-		panic(err)
-	}
-
-	publicListner, err := net.Listen("tcp", PublicListenAddr)
-	if err != nil {
-		logger.Error("Cannot listen for public connections", "publicAddr", PublicListenAddr)
-		os.Exit(-3)
-	}
-
-	server := khelamServer{
-		logger:        *logger,
-		session:       session,
-		publicListner: publicListner,
-	}
-
-	defer func() {
-		server.stop()
-		clientListener.Close()
-	}()
-
-	server.start()
-}
-
-func (ks *khelamServer) start() {
-	for {
-		publicUserConn, err := ks.publicListner.Accept()
-		if err != nil {
-			ks.logger.Error("Cannot connect to user", "userAddr", publicUserConn.RemoteAddr())
-			continue
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "-version", "--version", "version":
+			fmt.Println(version.String())
+			return
+		case "gen-token":
+			os.Exit(genToken(os.Args[2:]))
 		}
-
-		go ks.handleUserConnecton(publicUserConn)
 	}
-}
 
-func (ks *khelamServer) stop() {
-	ks.session.Close()
-	ks.publicListner.Close()
-}
+	logger := logger.New(logger.LoggerOptions{
+		Writer: os.Stdout,
+		Level:  slog.LevelInfo,
+	})
 
-func (ks *khelamServer) handleUserConnecton(conn net.Conn) {
-	defer conn.Close()
-	stream, err := ks.session.Open()
+	serverConfig, err := config.GetServerConfig(os.Args[1:])
 	if err != nil {
-		ks.logger.Error("Cannot open stream", "userAddr", stream.RemoteAddr())
-		return
+		logger.Error("error when parsing flags", "error", err)
+		os.Exit(1)
 	}
-	defer stream.Close()
 
-	done := make(chan struct{}, 2)
+	srv, err := server.New(server.Options{
+		Logger: logger,
+		Cfg:    serverConfig,
+	})
+	if err != nil {
+		logger.Error("error initializing server", "error", err)
+		os.Exit(1)
+	}
 
+	// SIGHUP reloads the tokens file without dropping other agents.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
 	go func() {
-		io.Copy(stream, conn)
-		done <- struct{}{}
+		for range hup {
+			if err := srv.ReloadTokens(); err != nil {
+				logger.Error("failed to reload tokens", "error", err)
+			}
+		}
 	}()
 
-	go func() {
-		io.Copy(conn, stream)
-		done <- struct{}{}
-	}()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	<-done
+	logger.Info("starting khelam server", "version", version.String())
+
+	if err := srv.Start(ctx); err != nil {
+		logger.Error("error starting server", "error", err)
+		os.Exit(1)
+	}
+
+	logger.Info("server stopped gracefully")
+}
+
+// genToken prints a new agent token and the tokens file entry for it.
+func genToken(args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: khelam-server gen-token NAME")
+		return 2
+	}
+
+	token, entry, err := auth.Generate(args[0])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+
+	fmt.Printf(`Token for %q (give it to the agent; it is not stored anywhere):
+
+  %s
+
+Add this entry under "tokens:" in the server's tokens file, then send
+the server SIGHUP to load it:
+
+  - name: %s
+    sha256: %s
+`, entry.Name, token, entry.Name, entry.SHA256)
+
+	return 0
 }

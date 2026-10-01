@@ -1,0 +1,35 @@
+# khelam agent config. Use with: khelam-agent -config agent.yaml
+# Flags given on the command line override these values.
+# Relative paths are resolved against this file's directory.
+
+# UDP address of the khelam server.
+server: tunnel.example.com:31000
+
+# Pin the server's self-signed certificate (from its startup log), or
+# use tls_ca for a certificate signed by your own CA. Omit both if the
+# server has a publicly trusted certificate.
+fingerprint: sha256:REPLACE_WITH_SERVER_FINGERPRINT
+# tls_ca: ca.pem
+
+# Token from `khelam-server gen-token`. Prefer token_file (or the
+# KHELAM_TOKEN environment variable) over putting the token here.
+token_file: agent.token
+
+# Shown in server logs. Defaults to the hostname.
+# name: home-server
+
+# Where this agent's ID is kept. The server keys sticky ports on it.
+# id_file: agent-id
+
+# Send a PROXY protocol v2 header to local TCP services so they see the
+# real client address. Only enable it if the services expect it.
+proxy_protocol: false
+
+tunnels:
+  # protocol defaults to tcp; name defaults to <protocol>-<port>. Each
+  # name keeps its public port across reconnects.
+  - name: minecraft
+    local: localhost:25565
+  - name: bedrock
+    protocol: udp
+    local: localhost:19132
