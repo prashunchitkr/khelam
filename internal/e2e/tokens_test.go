@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/prashunchitkr/khelamgg/internal/agent"
-	"github.com/prashunchitkr/khelamgg/internal/auth"
-	"github.com/prashunchitkr/khelamgg/internal/config"
-	"github.com/prashunchitkr/khelamgg/internal/protocol"
+	"github.com/prashunchitkr/khelam/internal/agent"
+	"github.com/prashunchitkr/khelam/internal/auth"
+	"github.com/prashunchitkr/khelam/internal/config"
+	"github.com/prashunchitkr/khelam/internal/protocol"
 	"go.yaml.in/yaml/v3"
 )
 

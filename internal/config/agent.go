@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/prashunchitkr/khelamgg/internal/protocol"
+	"github.com/prashunchitkr/khelam/internal/protocol"
 	"go.yaml.in/yaml/v3"
 )
 

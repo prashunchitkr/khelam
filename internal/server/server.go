@@ -12,11 +12,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prashunchitkr/khelamgg/internal/auth"
-	"github.com/prashunchitkr/khelamgg/internal/config"
-	"github.com/prashunchitkr/khelamgg/internal/protocol"
-	"github.com/prashunchitkr/khelamgg/internal/tlsutil"
-	"github.com/prashunchitkr/khelamgg/internal/transport"
+	"github.com/prashunchitkr/khelam/internal/auth"
+	"github.com/prashunchitkr/khelam/internal/config"
+	"github.com/prashunchitkr/khelam/internal/protocol"
+	"github.com/prashunchitkr/khelam/internal/tlsutil"
+	"github.com/prashunchitkr/khelam/internal/transport"
 )
 
 // Options carries the dependencies required to construct a Server.

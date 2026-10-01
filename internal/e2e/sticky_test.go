@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/prashunchitkr/khelamgg/internal/agent"
-	"github.com/prashunchitkr/khelamgg/internal/config"
+	"github.com/prashunchitkr/khelam/internal/agent"
+	"github.com/prashunchitkr/khelam/internal/config"
 )
 
 // TestStickyPortsAcrossAgentRestart checks that an agent gets its ports

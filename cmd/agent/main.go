@@ -8,10 +8,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/prashunchitkr/khelamgg/internal/agent"
-	"github.com/prashunchitkr/khelamgg/internal/config"
-	"github.com/prashunchitkr/khelamgg/internal/logger"
-	"github.com/prashunchitkr/khelamgg/internal/version"
+	"github.com/prashunchitkr/khelam/internal/agent"
+	"github.com/prashunchitkr/khelam/internal/config"
+	"github.com/prashunchitkr/khelam/internal/logger"
+	"github.com/prashunchitkr/khelam/internal/version"
 )
 
 // exitPermanent is the exit status for failures that restarting cannot

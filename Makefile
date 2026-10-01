@@ -3,7 +3,7 @@ SERVER_BIN=khelam-server
 AGENT_BIN=khelam-agent
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS = -s -w -X github.com/prashunchitkr/khelamgg/internal/version.Version=$(VERSION)
+LDFLAGS = -s -w -X github.com/prashunchitkr/khelam/internal/version.Version=$(VERSION)
 
 # docker or podman, whichever is installed.
 CONTAINER ?= $(shell command -v docker || command -v podman)

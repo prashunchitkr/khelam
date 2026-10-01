@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/prashunchitkr/khelamgg/internal/protocol"
+	"github.com/prashunchitkr/khelam/internal/protocol"
 )
 
 func TestReservationsPersist(t *testing.T) {

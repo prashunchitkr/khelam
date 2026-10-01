@@ -1,6 +1,6 @@
 // Package version reports the build version, set at link time:
 //
-//	go build -ldflags "-X github.com/prashunchitkr/khelamgg/internal/version.Version=v1.2.3"
+//	go build -ldflags "-X github.com/prashunchitkr/khelam/internal/version.Version=v1.2.3"
 package version
 
 import "runtime/debug"

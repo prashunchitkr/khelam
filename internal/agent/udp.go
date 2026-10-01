@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/prashunchitkr/khelamgg/internal/config"
-	"github.com/prashunchitkr/khelamgg/internal/protocol"
-	"github.com/prashunchitkr/khelamgg/internal/transport"
+	"github.com/prashunchitkr/khelam/internal/config"
+	"github.com/prashunchitkr/khelam/internal/protocol"
+	"github.com/prashunchitkr/khelam/internal/transport"
 )
 
 const (

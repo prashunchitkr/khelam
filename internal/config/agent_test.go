@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/prashunchitkr/khelamgg/internal/protocol"
+	"github.com/prashunchitkr/khelam/internal/protocol"
 )
 
 // writeConfig writes an agent config file and a token file next to it,

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prashunchitkr/khelamgg/internal/protocol"
+	"github.com/prashunchitkr/khelam/internal/protocol"
 )
 
 // reservationKey identifies the owner of a sticky port: one named

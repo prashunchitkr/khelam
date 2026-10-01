@@ -18,7 +18,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X github.com/prashunchitkr/khelamgg/internal/version.Version={{ .Version }}
+      - -s -w -X github.com/prashunchitkr/khelam/internal/version.Version={{ .Version }}
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64, arm]
     goarm: ["7"]

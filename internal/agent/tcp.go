@@ -7,10 +7,10 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/prashunchitkr/khelamgg/internal/config"
-	"github.com/prashunchitkr/khelamgg/internal/protocol"
-	"github.com/prashunchitkr/khelamgg/internal/proxyproto"
-	"github.com/prashunchitkr/khelamgg/internal/relay"
+	"github.com/prashunchitkr/khelam/internal/config"
+	"github.com/prashunchitkr/khelam/internal/protocol"
+	"github.com/prashunchitkr/khelam/internal/proxyproto"
+	"github.com/prashunchitkr/khelam/internal/relay"
 )
 
 // handleStream reads the stream header and relays the tunnelled

@@ -15,7 +15,7 @@ RUN go mod download
 COPY . .
 ARG TARGETOS TARGETARCH VERSION=dev
 ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
-RUN LDFLAGS="-s -w -X github.com/prashunchitkr/khelamgg/internal/version.Version=${VERSION}" && \
+RUN LDFLAGS="-s -w -X github.com/prashunchitkr/khelam/internal/version.Version=${VERSION}" && \
     go build -trimpath -ldflags "$LDFLAGS" -o /out/khelam-server ./cmd/server && \
     go build -trimpath -ldflags "$LDFLAGS" -o /out/khelam-agent ./cmd/agent && \
     mkdir -p /out/state

@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prashunchitkr/khelamgg/internal/agent"
-	"github.com/prashunchitkr/khelamgg/internal/config"
-	"github.com/prashunchitkr/khelamgg/internal/protocol"
-	"github.com/prashunchitkr/khelamgg/internal/server"
+	"github.com/prashunchitkr/khelam/internal/agent"
+	"github.com/prashunchitkr/khelam/internal/config"
+	"github.com/prashunchitkr/khelam/internal/protocol"
+	"github.com/prashunchitkr/khelam/internal/server"
 )
 
 const waitTimeout = 10 * time.Second

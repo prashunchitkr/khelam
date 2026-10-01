@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prashunchitkr/khelamgg/internal/config"
+	"github.com/prashunchitkr/khelam/internal/config"
 )
 
 func TestTunnelEcho(t *testing.T) {

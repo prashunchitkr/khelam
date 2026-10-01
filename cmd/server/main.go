@@ -8,11 +8,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/prashunchitkr/khelamgg/internal/auth"
-	"github.com/prashunchitkr/khelamgg/internal/config"
-	"github.com/prashunchitkr/khelamgg/internal/logger"
-	"github.com/prashunchitkr/khelamgg/internal/server"
-	"github.com/prashunchitkr/khelamgg/internal/version"
+	"github.com/prashunchitkr/khelam/internal/auth"
+	"github.com/prashunchitkr/khelam/internal/config"
+	"github.com/prashunchitkr/khelam/internal/logger"
+	"github.com/prashunchitkr/khelam/internal/server"
+	"github.com/prashunchitkr/khelam/internal/version"
 )
 
 func main() {

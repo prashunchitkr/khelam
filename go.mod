@@ -1,4 +1,4 @@
-module github.com/prashunchitkr/khelamgg
+module github.com/prashunchitkr/khelam
 
 go 1.27.0
 

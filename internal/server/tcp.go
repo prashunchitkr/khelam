@@ -5,9 +5,9 @@ import (
 	"net"
 	"time"
 
-	"github.com/prashunchitkr/khelamgg/internal/protocol"
-	"github.com/prashunchitkr/khelamgg/internal/relay"
-	"github.com/prashunchitkr/khelamgg/internal/transport"
+	"github.com/prashunchitkr/khelam/internal/protocol"
+	"github.com/prashunchitkr/khelam/internal/relay"
+	"github.com/prashunchitkr/khelam/internal/transport"
 )
 
 // openStreamTimeout bounds waiting for the agent to allow another
